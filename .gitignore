@@ -68,3 +68,6 @@ Testing/
 .cache/
 
 
+
+# Baseline allocator builds (scripts/build-allocators.sh)
+build-deps/

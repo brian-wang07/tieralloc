@@ -1,6 +1,8 @@
 #pragma once
 
 #include "clock.hpp"
+#include "perf.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -8,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <type_traits>
 #if defined(__linux__)
@@ -62,16 +65,27 @@ inline int currentCPU() noexcept {
 struct RegionResult {
   std::uint64_t startTicks{0}, endTicks{0};
   int cpuBegin{-1}, cpuEnd{-1};
+  CounterSnapshot counterBegin{}, counterEnd{};
+  bool hasCounters{false};
 
   std::uint64_t ticks() const noexcept { return endTicks - startTicks; }
   bool migrated() const noexcept {
     return cpuEnd != -1 && cpuBegin != -1 && cpuBegin != cpuEnd;
   }
   double ns(const ClockInfo &c) const { return c.toNs(ticks()); }
+  std::optional<CounterResult> counters() const noexcept {
+    if (!hasCounters)
+      return std::nullopt;
+    return diff(counterBegin, counterEnd);
+  }
 };
 
 struct Region {
-  Region() = default;
+  // With counters, the group is read just outside the timed window at both
+  // ends, so the read() syscall is not part of the measured ticks.
+  explicit Region(PerfGroup *counters = nullptr) noexcept : counters(counters) {
+    measured.hasCounters = counters != nullptr;
+  }
   ~Region() = default;
 
   Region(const Region &other) = delete;
@@ -80,6 +94,8 @@ struct Region {
   [[gnu::always_inline]] inline void begin() noexcept {
     assert(state == State::Idle);
     measured.cpuBegin = currentCPU();
+    if (counters)
+      measured.counterBegin = counters->snapshot();
     clobberMemory();
     measured.startTicks = readTicks();
     clobberMemory();
@@ -91,6 +107,8 @@ struct Region {
     clobberMemory();
     measured.endTicks = readTicks();
     clobberMemory();
+    if (counters)
+      measured.counterEnd = counters->snapshot();
     measured.cpuEnd = currentCPU();
     state = State::Done;
   }
@@ -102,6 +120,7 @@ struct Region {
 
 private:
   enum class State { Idle, Running, Done };
+  PerfGroup *counters;
   RegionResult measured;
   State state{State::Idle};
 };
@@ -131,6 +150,30 @@ inline TimerOverhead measureTimerOverhead() noexcept {
           static_cast<double>(
               std::accumulate(gaps.begin(), gaps.end(), std::uint64_t{0})) /
               N};
+}
+
+// Runs empty regions and keeps the median count per counter.
+template <std::size_t N = 255>
+inline CounterOverhead measureCounterOverhead(PerfGroup &group) noexcept {
+  static_assert(N > 0, "N must be greater than 0");
+  std::array<std::array<std::uint64_t, N>, counterCount> samples;
+  CounterOverhead overhead;
+  overhead.ok = true;
+  for (std::size_t i{0}; i < N; ++i) {
+    Region region(&group);
+    region.begin();
+    region.end();
+    CounterResult r = *region.result().counters();
+    overhead.ok = overhead.ok && r.status == CounterStatus::Ok;
+    for (std::size_t c{0}; c < counterCount; ++c)
+      samples[c][i] = r.values[c];
+  }
+  for (std::size_t c{0}; c < counterCount; ++c) {
+    std::nth_element(samples[c].begin(), samples[c].begin() + N / 2,
+                     samples[c].end());
+    overhead.median[c] = samples[c][N / 2];
+  }
+  return overhead;
 }
 
 template <class Fn>

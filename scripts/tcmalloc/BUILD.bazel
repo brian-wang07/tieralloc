@@ -1,0 +1,9 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+# The default tcmalloc (8 KiB pages, per-CPU caches, hugepage-aware backend),
+# with abseil linked in statically so the .so has no Bazel-only dependencies.
+cc_binary(
+    name = "libtcmalloc.so",
+    linkshared = True,
+    deps = ["@tcmalloc//tcmalloc"],
+)

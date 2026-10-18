@@ -35,6 +35,15 @@ Compile-time hints about which objects are **hot** and which **die together** bu
 
 Raw malloc/free cost is expected to be near mimalloc's, not better. The headline comparison is **tieralloc with hints vs. tieralloc without hints** on the same workload; external allocators are context.
 
+## Why not hinted tcmalloc + std::pmr
+
+That combination is the closest existing alternative. tieralloc differs in four ways:
+
+- **Compile-time hints.** Placement comes from the type (`tier::hint_for<T>`, `tier::managed<T>`, and C++26 reflection annotations once `__cpp_impl_reflection` is available), so the heap is fixed at compile time with no runtime lookup. Call sites don't pass hints and no `memory_resource` is threaded through. Hints are still declared by the user, never predicted.
+- **N tiers.** tcmalloc's hot/cold `operator new` hint is binary. tieralloc has N tiers (default 3: hot/warm/cold) crossed with M lifetime classes.
+- **Zero size overhead.** `std::pmr` stores a `memory_resource *` in every container and goes through a virtual `do_allocate`/`do_deallocate` on every call. `tier::allocator<T>` is stateless (empty) and dispatches statically. `free` finds the segment by masking the pointer, so objects carry no header and the pointer isn't stored anywhere.
+- **Free policies that know the lifetime class.** pmr gives a choice between `monotonic_buffer_resource` (never frees) and pool resources (free lists). tieralloc ties the free policy to the lifetime class: transient pages are bump-only and reset when they empty, persistent pages use LIFO free lists. Each tier also has its own purge policy (`never` / `eager` / `decay(ms)`).
+
 ## Deliverables
 
 1. **`tieralloc.hpp`**: stb-style single-header library (`#define TIERALLOC_IMPLEMENTATION` in one TU). C++20 minimum, no dependencies beyond the standard library and OS headers. Linux/macOS/Windows on x86-64 and AArch64.
@@ -42,8 +51,21 @@ Raw malloc/free cost is expected to be near mimalloc's, not better. The headline
    - Hint API: `tier::hint`, `tier::hint_for<T>` trait, `tier::managed<T>` CRTP base, `tier::make<T, H>`, `tier::allocator<T>`, `tier::alloc<H>(n)`. C++26 reflection annotations are used when `__cpp_impl_reflection` is defined.
    - Lifetime-aware free policy: transient pages are bump-only and reset when empty; persistent pages use LIFO free lists. Per-tier purge policy: `never` / `eager` / `decay(ms)`.
    - Optional `LD_PRELOAD` malloc replacement (Linux only).
-2. **`tieralloc-trace` + `tieralloc-viz`**: Linux-only profiler. Inline ~40 B event records to thread-local rings; a single watcher thread handles draining, `/proc` sampling, `mincore`, and PEBS (`perf_event_open`). `tieralloc-viz` (Python) replays traces offline into views such as the address-space strip, live vs. RSS, hotness heatmap, hot-set span, page death spread, and hint audit.
+2. **`tieralloc-trace` + `tieralloc-viz`**: Linux-only profiler. Inline ~40 B event records to thread-local rings; a single watcher thread handles draining, `/proc` sampling, `mincore`, and PEBS (`perf_event_open`). `tieralloc-viz` (Python) replays traces offline into views such as the address-space strip, live vs. RSS, hotness heatmap, hot-set span, page death spread, and hint audit. It must also cover every feature of the positional heap profiler described under *Positional heap views* below.
 3. **`tieralloc-bench`**: three workloads (fragmentation churn, order-book replay, pointer chase) across seven configurations (glibc, jemalloc, mimalloc, tieralloc without and with hints, hand-written pools, hinted tcmalloc). Performance results are Linux only; library tests run in CI on all three OSes.
+
+## Positional heap views
+
+These are modeled on the "Memory Allocation Analyzer" positional heap profiler from a CppCon 2026 talk ("Let's Build a Positional Heap Profiler: Visualizing Pinning"). `tieralloc-viz` must support all of its features, for both glibc traces and tieralloc traces. The point is to show **pinning**: memory that stays resident because a few live allocations are scattered across otherwise empty heaps.
+
+- **Summary bar.** Total allocations, active (live) allocations, and heap count.
+- **Memory over time.** A line chart of total heap size (RSS owned by the heap), total allocated (live) bytes, and mmap'd allocations. A click selects a time point, and back/forward buttons step through time (5 s by default). There's a fullscreen mode. Every other view shows state at the selected time.
+- **Tabs.** Arenas / Heatmaps, Size Distribution, and Flamegraphs, all for the selected time.
+- **Arenas table.** One row per arena with its ID and label (e.g. `main`, `mmap'd`), heap count, total heap size, and total allocated. Selecting a row opens that arena's heatmaps.
+- **Per-heap heatmaps.** One strip per heap in the selected arena. Each strip is a grid of fixed-size address-range blocks (e.g. 512 blocks laid out 128×4), colored by occupancy density from 0% to 100%. The strip header shows the heap base address, size, allocation count, used bytes with the used percentage, and the block grid shape. The unused tail of the last heap (glibc's top chunk) is drawn as a separate, visually distinct region.
+- **Block allocation details.** Clicking a block lists the live allocations in its address range: index, address, size, allocation callstack, and free callstack (`N/A` while the allocation is still live). The header shows the heap, the block index and address range, and the allocation count.
+
+How these map onto tieralloc: an arena is a (tier, lifetime) heap (per thread), a heap is a 2 MiB segment, and the heatmap grid can be drawn at page (64 KiB) or finer granularity. The top chunk corresponds to the not-yet-bumped tail of a page or segment. To produce the block details view, the trace has to record callstack IDs (deduplicated, resolved offline) on both alloc and free. That has to fit the inline-path constraints below.
 
 ## Key principles
 
@@ -51,7 +73,7 @@ Raw malloc/free cost is expected to be near mimalloc's, not better. The headline
 - `free` is tier-agnostic: it finds the segment by masking the pointer.
 - The profiler's inline path does no syscalls, locks or allocation. The watcher never calls `malloc`. Rings block on overflow instead of dropping events.
 - Timing runs are untraced; traced runs are never used for timing.
-- Non-goals: multi-threaded scalability tuning, security hardening, lifetime prediction, drop-in override and profiler on macOS/Windows, interactive GUI. Anything on the out-of-scope list needs an explicit decision before it's added.
+- Non-goals: multi-threaded scalability tuning, security hardening, lifetime prediction, drop-in override and profiler on macOS/Windows, a live or attach-to-process GUI. Interactive viz output, like the positional heap views, is in scope only as an offline report generated from a recorded trace. Anything on the out-of-scope list needs an explicit decision before it's added.
 
 ## Milestones
 

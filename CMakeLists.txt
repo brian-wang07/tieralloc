@@ -16,8 +16,6 @@ endif()
 
 option(TIERALLOC_BUILD_BENCH "Build tieralloc-bench workloads and microbenchmarks" ON)
 option(TIERALLOC_NATIVE "Compile with -march=native (recorded in results; off for portability)" OFF)
-set(TIERALLOC_TCMALLOC_ROOT "" CACHE PATH
-    "Prefix of a Google tcmalloc build (headers + libtcmalloc); enables the hinted-tcmalloc variant")
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
   message(STATUS "Non-Linux host: workloads build, but perf counters, LD_PRELOAD baselines "

@@ -1,0 +1,15 @@
+# Wraps Google tcmalloc into a shared library for LD_PRELOAD. Upstream has no
+# releases or shared-library target, so this pins a commit and links its
+# alwayslink //tcmalloc target into one .so. Built by build-allocators.sh,
+# which checks that the commit below matches its own pin.
+
+module(name = "tieralloc_tcmalloc")
+
+bazel_dep(name = "rules_cc", version = "0.2.9")
+bazel_dep(name = "tcmalloc")
+git_override(
+    module_name = "tcmalloc",
+    # 2026-10-07; passed upstream CI on five consecutive scheduled runs.
+    commit = "8ab5266c53294d06c0884dd45ef7529b1c08ab67",
+    remote = "https://github.com/google/tcmalloc.git",
+)

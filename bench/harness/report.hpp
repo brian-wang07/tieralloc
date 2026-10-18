@@ -1,16 +1,22 @@
 #pragma once
 
 // The common part of every result line: what ran, how it was built, the clock,
-// the timer overhead, the measured region and the parameters. A workload adds
-// its own values under "metrics" and writes the line with writeRecord().
+// the timer overhead, the counters, the measured region, memory and the
+// parameters. A workload adds its own values under "metrics" and writes the
+// line with writeRecord().
 //
 // Usage, after the measured region and recalibrate():
-//   auto record = makeRecord("churn", "default", clock, overhead, region,
-//   args); record["metrics"]["nsPerOp"] = ...; writeRecord(record,
-//   args.getString("out", ""));
+//   auto record = makeRecord("churn", "default", clock, overhead, counters,
+//                            region, memory, args);
+//   record["metrics"]["nsPerOp"] = ...;
+//   writeRecord(record, args.getString("out", ""));
 
+#include "allocator.hpp"
 #include "args.hpp"
 #include "clock.hpp"
+#include "counters.hpp"
+#include "memstats.hpp"
+#include "perf.hpp"
 #include "region.hpp"
 
 #include <nlohmann/json.hpp>
@@ -41,7 +47,7 @@ namespace tabench {
 using Json = nlohmann::ordered_json;
 
 // Bump whenever a field is added, removed or changes meaning.
-inline constexpr int resultSchema = 1;
+inline constexpr int resultSchema = 2;
 
 // The allocation backend this binary was compiled for.
 constexpr const char *backendName() noexcept {
@@ -49,8 +55,6 @@ constexpr const char *backendName() noexcept {
   return "plain";
 #elif defined(TA_BACKEND_POOLS)
   return "pools";
-#elif defined(TA_BACKEND_TCMALLOC)
-  return "tcmalloc";
 #else
   return "none";
 #endif
@@ -106,12 +110,111 @@ inline Json toJson(const RegionResult &r, const ClockInfo &c) {
   return j;
 }
 
+// Per-counter values as an object keyed by the table's event names.
+inline Json counterValues(const std::array<std::uint64_t, counterCount> &values,
+                          const EventTable &table) {
+  Json j = Json::object();
+  for (const EventSpec &spec : table.events)
+    j[spec.name] = values[index(spec.counter)];
+  return j;
+}
+
+inline Json toJson(const CounterResult &r, const EventTable &table) {
+  Json j;
+  j["status"] = toString(r.status);
+  j["multiplexRatio"] = r.multiplexRatio();
+  j["enabledNs"] = r.enabledNs;
+  j["runningNs"] = r.runningNs;
+  j["values"] = counterValues(r.values, table);
+  return j;
+}
+
+// The group's setup, its empty-region overhead and the region's counts; or
+// the reason there are no counters.
+inline Json toJson(const Counters &counters, const RegionResult &region) {
+  Json j;
+  j["mode"] = toString(counters.mode);
+  if (!counters.group) {
+    j["available"] = false;
+    j["unavailable"] = counters.unavailable;
+    return j;
+  }
+  const PerfGroup &group = *counters.group;
+  const detail::PMUInfo &pmu = group.pmuInfo();
+  j["available"] = true;
+  j["pmu"]["device"] = pmu.device;
+  j["pmu"]["model"] = pmu.model;
+  j["pmu"]["type"] = pmu.type;
+  j["pmu"]["hybrid"] = pmu.hybrid;
+  j["table"] = group.table().id;
+  j["events"] = Json::array();
+  for (const EventSpec &spec : group.table().events)
+    j["events"].push_back(
+        {{"name", spec.name}, {"encoding", group.encodingOf(spec)}});
+  j["excludeKernel"] = true;
+  j["pinned"] = true;
+  j["overhead"]["ok"] = counters.overhead.ok;
+  j["overhead"]["median"] =
+      counterValues(counters.overhead.median, group.table());
+  std::optional<CounterResult> result = region.counters();
+  j["region"] = result ? toJson(*result, group.table()) : Json(nullptr);
+  return j;
+}
+
+inline Json toJson(const MemoryStats &m) {
+  if (!m.ok)
+    return nullptr;
+  Json j;
+  j["rssKiB"] = m.rssKiB;
+  j["anonymousKiB"] = m.anonymousKiB;
+  j["anonHugePagesKiB"] = m.anonHugePagesKiB;
+  j["lazyFreeKiB"] = m.lazyFreeKiB;
+  j["heldAnonKiB"] = m.heldAnonKiB();
+  j["vmRSSKiB"] = m.vmRSSKiB;
+  j["vmHWMKiB"] = m.vmHWMKiB;
+  return j;
+}
+
+// Ticks are absolute; convert differences with clock.ticksPerNs.
+inline Json toJson(const RSSSample &s) {
+  if (!s.ok)
+    return nullptr;
+  Json j;
+  j["ticks"] = s.ticks;
+  j["rssBytes"] = s.rssBytes;
+  j["anonBytes"] = s.anonBytes;
+  j["liveBytes"] = s.liveBytes;
+  return j;
+}
+
+// The peak is VmHWM after the region. With the reset it is the peak during the
+// region; peakGrowthKiB is how far it rose above the RSS at the reset. Both
+// sides come from the kernel's RSS counters, so they are comparable.
+inline Json toJson(const MemoryReport &m) {
+  Json j;
+  j["startup"] = toJson(m.startup);
+  j["before"] = toJson(m.before);
+  j["after"] = toJson(m.after);
+  j["peakReset"] = m.peakReset;
+  bool peakKnown = m.before.ok && m.after.ok;
+  j["peakKiB"] = peakKnown ? Json(m.after.vmHWMKiB) : Json(nullptr);
+  j["peakGrowthKiB"] = peakKnown && m.peakReset
+                           ? Json(static_cast<std::int64_t>(m.after.vmHWMKiB) -
+                                  static_cast<std::int64_t>(m.before.vmRSSKiB))
+                           : Json(nullptr);
+  j["inputBytes"] = m.inputBytes;
+  j["samples"] = Json::array();
+  for (const RSSSample &s : m.samples)
+    j["samples"].push_back(toJson(s));
+  return j;
+}
+
 // Builds the record with every common field, in a fixed order. "metrics" is
-// left empty for the workload; "counters" and "memory" are null until perf
-// counters and memory stats exist.
+// left empty for the workload.
 inline Json makeRecord(std::string_view workload, std::string_view variant,
                        const ClockInfo &clock, const TimerOverhead &overhead,
-                       const RegionResult &region, const Args &args) {
+                       const Counters &counters, const RegionResult &region,
+                       const MemoryReport &memory, const Args &args) {
   Json j;
   j["schema"] = resultSchema;
   j["timestamp"] = utcTimestamp();
@@ -119,6 +222,9 @@ inline Json makeRecord(std::string_view workload, std::string_view variant,
   j["variant"] = variant;
   j["backend"] = backendName();
   j["ldPreload"] = envOrNull("LD_PRELOAD");
+  AllocatorInfo allocator = detectAllocator();
+  j["allocator"]["name"] = allocator.name;
+  j["allocator"]["version"] = allocator.version;
   j["build"]["compiler"] = TA_COMPILER;
   j["build"]["buildType"] = TA_BUILD_TYPE;
   j["build"]["native"] = TA_NATIVE != 0;
@@ -127,8 +233,8 @@ inline Json makeRecord(std::string_view workload, std::string_view variant,
   j["region"] = toJson(region, clock);
   j["params"] = args.params();
   j["metrics"] = Json::object();
-  j["counters"] = nullptr;
-  j["memory"] = nullptr;
+  j["counters"] = toJson(counters, region);
+  j["memory"] = toJson(memory);
   return j;
 }
 

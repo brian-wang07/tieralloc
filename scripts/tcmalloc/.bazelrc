@@ -1,0 +1,8 @@
+# tcmalloc's own .bazelrc does not apply to it as a dependency; these are the
+# parts of it a build needs.
+build --cxxopt=-std=c++17 --host_cxxopt=-std=c++17
+build --per_file_copt=external/.*@-w --host_per_file_copt=external/.*@-w
+build --incompatible_disallow_empty_glob
+common --incompatible_config_setting_private_default_visibility
+# No bazel-* symlinks in the source tree; build-allocators.sh asks for the path.
+build --symlink_prefix=/
