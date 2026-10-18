@@ -3,9 +3,9 @@
 // stayed on one CPU, and that argument parsing behaves. Exits nonzero if any
 // check fails.
 //
-// On Linux, run it pinned (e.g. `taskset -c 2 ./harness-selftest`); unpinned,
-// the pinning check can fail legitimately. Counter checks are skipped when no
-// counters can be opened (VMs, CI) unless --require-counters is given;
+// On Linux, run it pinned (e.g. `taskset -c 2 ./harness-selftest`); unpinned
+// (as under ctest), the pinning check is skipped. Counter checks are skipped
+// when no counters can be opened (VMs, CI) unless --require-counters is given;
 // --counter-table=auto|raw|generic picks the event table to check.
 // --no-timing skips the wall-clock checks.
 // --expect-allocator=NAME fails unless that allocator serves malloc; the
@@ -39,10 +39,22 @@
 
 #include <unistd.h>
 #if defined(__linux__)
+#include <sched.h>
 #include <sys/mman.h>
 #endif
 
 namespace {
+
+// How many CPUs this thread may run on, or 0 if unknown. Migration only
+// means something when the affinity mask holds a single CPU.
+int allowedCPUs() {
+#if defined(__linux__)
+  cpu_set_t set;
+  if (sched_getaffinity(0, sizeof(set), &set) == 0)
+    return CPU_COUNT(&set);
+#endif
+  return 0;
+}
 
 // Thresholds. The sleep bound is loose because the OS may oversleep by a few
 // ms; the scaling band is loose because macOS cannot pin threads.
@@ -640,8 +652,12 @@ int main(int argc, char **argv) {
   double sleepMs = sleepResult.ns(clock) / 1e6;
   checkTiming(sleepMs >= minSleepMs && sleepMs <= maxSleepMs, "sleep",
               "100 ms sleep measured %.2f ms", sleepMs);
+  int cpus = allowedCPUs();
   if (sleepResult.cpuBegin == -1)
     check(true, "pinning", "CPU unknown on this platform (not checked)");
+  else if (cpus != 1)
+    std::printf("SKIP  pinning   not pinned (%d CPUs allowed); use taskset\n",
+                cpus);
   else
     check(!sleepResult.migrated(), "pinning", "CPU %d at begin, %d at end",
           sleepResult.cpuBegin, sleepResult.cpuEnd);
