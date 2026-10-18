@@ -14,6 +14,7 @@
 #include "allocator.hpp"
 #include "args.hpp"
 #include "clock.hpp"
+#include "contracts.hpp"
 #include "counters.hpp"
 #include "memstats.hpp"
 #include "perf.hpp"
@@ -228,6 +229,7 @@ inline Json makeRecord(std::string_view workload, std::string_view variant,
   j["build"]["compiler"] = TA_COMPILER;
   j["build"]["buildType"] = TA_BUILD_TYPE;
   j["build"]["native"] = TA_NATIVE != 0;
+  j["build"]["contractSemantic"] = TA_CONTRACT_SEMANTIC;
   j["clock"] = toJson(clock);
   j["timerOverhead"] = toJson(overhead, clock);
   j["region"] = toJson(region, clock);

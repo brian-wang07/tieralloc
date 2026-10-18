@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.25)
 project(tieralloc VERSION 0.1.0 LANGUAGES CXX)
 
-# The bench, profiler and tooling use C++23. tieralloc.hpp itself must stay
-# C++20-compatible: its test targets (M2) override CXX_STANDARD to 20.
-set(CMAKE_CXX_STANDARD 23)
+# The bench, profiler and tooling use C++26 (for contracts; GCC 16 is the
+# project's compiler). tieralloc.hpp itself must stay C++20-compatible: its
+# test targets (M2) override CXX_STANDARD to 20.
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

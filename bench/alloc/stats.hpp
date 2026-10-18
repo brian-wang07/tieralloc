@@ -10,6 +10,7 @@
 //   seam.end = seamStats;
 //   record["metrics"]["seam"] = toJson(seam);
 
+#include "harness/contracts.hpp"
 #include "role.hpp"
 
 #include <nlohmann/json.hpp>
@@ -71,7 +72,7 @@ difference(const std::array<std::uint64_t, roleCount> &begin,
 } // namespace detail
 
 // Plain data plus the functions that keep totalLiveBytes and peakLiveBytes
-// consistent; Not thread-safe:
+// consistent; Not thread-safe
 struct SeamStats {
   std::array<std::uint64_t, roleCount> liveBytes{};
   std::array<std::uint64_t, roleCount> allocations{};
@@ -95,11 +96,10 @@ struct SeamStats {
   }
 
   template <Role R>
-  [[gnu::always_inline]] inline void recordFree(std::size_t bytes) noexcept {
+  [[gnu::always_inline]] inline void recordFree(std::size_t bytes) noexcept
+      TA_PRE(liveBytes[index(R)] >= bytes) {
 #if TA_SEAM_CHECKS
     checkThread(R, bytes);
-    if (liveBytes[index(R)] < bytes)
-      detail::seamCheckFailed("free exceeds live bytes for its role", R, bytes);
 #endif
     liveBytes[index(R)] -= bytes;
     totalLiveBytes -= bytes;

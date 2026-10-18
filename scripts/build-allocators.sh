@@ -37,7 +37,7 @@ MIMALLOC_HUGEPAGE_ENV='MIMALLOC_ALLOW_LARGE_OS_PAGES=1'
 
 # Exported by every working malloc replacement; checked with nm -D.
 REQUIRED_SYMBOLS=(malloc free calloc realloc posix_memalign aligned_alloc
-  malloc_usable_size _Znwm _ZdlPv _ZdlPvm)
+  malloc_usable_size _Znwm _ZdlPv _ZdlPvm _ZnwmSt11align_val_t _ZdlPvmSt11align_val_t)
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PREFIX=$ROOT/build-deps
@@ -78,16 +78,20 @@ done
 
 mkdir -p "$PREFIX"/{downloads,src,build,lib,bin,logs}
 
-# The pin string recorded for a built allocator, or empty.
-recorded_pin() {
+# A field recorded in a built allocator's build-info.json, or empty.
+recorded_field() {
   local info=$PREFIX/lib/$1/build-info.json
   [[ -f $info ]] || return 0
-  python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pin",""))' "$info"
+  python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2],""))' \
+    "$info" "$2"
 }
 
+# The compiler is part of the key: after a toolchain upgrade every allocator
+# must be rebuilt, or the baselines silently keep the old compiler's code.
 up_to_date() {
   local name=$1 pin=$2 lib=$3
-  [[ $FORCE == 0 && -f $lib && "$(recorded_pin "$name")" == "$pin" ]]
+  [[ $FORCE == 0 && -f $lib && "$(recorded_field "$name" pin)" == "$pin" &&
+    "$(recorded_field "$name" compiler)" == "$(compiler_id)" ]]
 }
 
 check_sha256() {
@@ -267,6 +271,12 @@ build_tcmalloc() {
   local -a bazel=(env BAZELISK_HOME="$PREFIX/bazelisk" "$BAZELISK"
     --output_user_root="$PREFIX/bazel")
   local bazel_flags="-c opt --jobs=$JOBS"
+  # Bazel tracks neither the compiler binary nor the system headers, and its
+  # autodetected toolchain caches the compiler's include paths, so a rebuild
+  # after a compiler change would reuse stale objects. Downloads survive this
+  # in the repository cache.
+  (cd "$workspace" && "${bazel[@]}" clean --expunge >"$PREFIX/logs/tcmalloc-clean.log" 2>&1) ||
+    die "bazel clean failed; see $PREFIX/logs/tcmalloc-clean.log"
   (
     cd "$workspace"
     "${bazel[@]}" build $bazel_flags //:libtcmalloc.so >"$PREFIX/logs/tcmalloc-build.log" 2>&1

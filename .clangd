@@ -1,0 +1,9 @@
+# clangd parses with Clang, but everything measured is built with GCC 16. Strip
+# the GCC-only flags from compile_commands.json so clangd doesn't report
+# "unknown argument" on every file. Contracts and reflection then take their
+# fallback paths in the editor, which is intended.
+CompileFlags:
+  Remove:
+    - -fcontract-evaluation-semantic=*
+    - -fcontracts*
+    - -freflection

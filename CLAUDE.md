@@ -19,7 +19,7 @@ LLVM style, with one deviation: variables use lowerCamelCase.
   - Macros: `UPPER_SNAKE_CASE` with a project prefix (`TA_`, `TIERALLOC_`).
   - Acronyms are upper-case inside a name and lower-case at the start of a lowerCamelCase name (`currentCPU`, `cpuBegin`).
   - Never use reserved identifiers: a leading underscore followed by a capital letter, or a double underscore anywhere.
-- **Language standard:** C++23 for the bench, profiler and tooling. `tieralloc.hpp` must stay C++20-compatible (its tests build at C++20).
+- **Language standard:** C++26 for the bench, profiler and tooling, built with GCC 16 (one compiler for everything measured; Clang/LLVM for tooling and sanitizers only). `tieralloc.hpp` must stay C++20-compatible (its tests build at C++20).
 - **Headers:** `#pragma once`. Includes go project headers first, then standard library headers, then platform headers guarded by `#if`.
 - **Comments:** `//`, written as sentences; explain *why*, not what.
 

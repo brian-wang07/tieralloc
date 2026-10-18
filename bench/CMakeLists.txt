@@ -13,9 +13,57 @@ target_link_libraries(tieralloc_harness INTERFACE tieralloc_options Threads::Thr
 add_library(nlohmann_json INTERFACE)
 target_include_directories(nlohmann_json SYSTEM INTERFACE ${PROJECT_SOURCE_DIR}/third_party)
 
+# Contract checking (see harness/contracts.hpp). One setting drives three things
+# per target: GCC's -fcontract-evaluation-semantic, TA_CONTRACT_SEMANTIC for the
+# result record, and TA_SEAM_CHECKS for the manual checks that write state and
+# so cannot be contracts (the seam's owner thread). Workloads take the cache
+# value; timing runs must use ignore, and the runner rejects anything else.
+# Tests always use enforce.
+set(TIERALLOC_CONTRACT_SEMANTICS ignore observe enforce quick_enforce)
+set(TIERALLOC_CONTRACT_SEMANTIC ignore CACHE STRING
+    "Contract evaluation semantic for workloads: ${TIERALLOC_CONTRACT_SEMANTICS}")
+set_property(CACHE TIERALLOC_CONTRACT_SEMANTIC PROPERTY STRINGS ${TIERALLOC_CONTRACT_SEMANTICS})
+if(NOT TIERALLOC_CONTRACT_SEMANTIC IN_LIST TIERALLOC_CONTRACT_SEMANTICS)
+  message(FATAL_ERROR "TIERALLOC_CONTRACT_SEMANTIC must be one of: ${TIERALLOC_CONTRACT_SEMANTICS}")
+endif()
+
+# C++26 contracts as these macros use them first appear in GCC 16. Other
+# compilers (Clang for tooling and sanitizers) take the macros' fallbacks, so
+# they get no flags and TA_CONTRACT_SEMANTIC reports "none".
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16)
+  set(TIERALLOC_HAS_CONTRACTS ON)
+else()
+  set(TIERALLOC_HAS_CONTRACTS OFF)
+  message(STATUS "bench: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} has no C++26 "
+                 "contracts; measured results must come from GCC 16")
+endif()
+
+# tieralloc_contract_semantic(<target> <semantic>)
+function(tieralloc_contract_semantic target semantic)
+  if(NOT semantic IN_LIST TIERALLOC_CONTRACT_SEMANTICS)
+    message(FATAL_ERROR "${target}: unknown contract semantic '${semantic}'")
+  endif()
+  if(semantic STREQUAL "ignore")
+    set(seamChecks 0)
+  else()
+    set(seamChecks 1)
+  endif()
+  target_compile_definitions(${target} PRIVATE TA_SEAM_CHECKS=${seamChecks})
+  if(TIERALLOC_HAS_CONTRACTS)
+    target_compile_options(${target} PRIVATE -fcontract-evaluation-semantic=${semantic})
+    target_compile_definitions(${target} PRIVATE TA_CONTRACT_SEMANTIC="${semantic}")
+    # GCC 16 ships the default violation handler in libstdc++exp. ignore emits
+    # no handler calls, so timing builds don't link the experimental library.
+    if(NOT semantic STREQUAL "ignore")
+      target_link_libraries(${target} PRIVATE stdc++exp)
+    endif()
+  endif()
+endfunction()
+
 # Run first on any new machine (and via ctest): clock, region, batch and pinning checks.
 add_executable(harness-selftest harness_selftest.cpp)
 target_link_libraries(harness-selftest PRIVATE tieralloc_harness)
+tieralloc_contract_semantic(harness-selftest enforce)
 add_test(NAME harness-selftest COMMAND harness-selftest)
 
 # Allocation backends. Each workload is compiled once per backend from the same
@@ -26,12 +74,6 @@ add_test(NAME harness-selftest COMMAND harness-selftest)
 set(TIERALLOC_BENCH_BACKENDS plain pools)
 
 message(STATUS "bench backends: ${TIERALLOC_BENCH_BACKENDS}")
-
-# Seam debug checks (owner thread, free underflow, pool ownership) in workloads.
-# Set per target rather than from NDEBUG so a Debug build can still be timed
-# and the result says which it was. Never on for timing runs. The seam tests
-# always enable them.
-option(TIERALLOC_SEAM_CHECKS "Enable seam debug checks in workloads (not for timing runs)" OFF)
 
 # tieralloc_add_workload(<name> <source>) -> bin/<name>-<backend> for each backend.
 # Sources not written yet are skipped so the tree configures while M0 is in progress.
@@ -44,21 +86,22 @@ function(tieralloc_add_workload name source)
     set(target ${name}-${backend})
     add_executable(${target} ${source})
     string(TOUPPER ${backend} BACKEND)
-    target_compile_definitions(${target} PRIVATE TA_BACKEND_${BACKEND}=1
-                               TA_SEAM_CHECKS=$<BOOL:${TIERALLOC_SEAM_CHECKS}>)
+    target_compile_definitions(${target} PRIVATE TA_BACKEND_${BACKEND}=1)
     target_link_libraries(${target} PRIVATE tieralloc_harness)
+    tieralloc_contract_semantic(${target} ${TIERALLOC_CONTRACT_SEMANTIC})
   endforeach()
 endfunction()
 
-# Seam tests: one binary per backend, checks always on.
+# Seam tests: one binary per backend, contracts and checks always enforced.
 set(TIERALLOC_SEAM_TEST_SOURCE alloc_seam_test.cpp)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${TIERALLOC_SEAM_TEST_SOURCE})
   foreach(backend IN LISTS TIERALLOC_BENCH_BACKENDS)
     set(target seam-test-${backend})
     add_executable(${target} ${TIERALLOC_SEAM_TEST_SOURCE})
     string(TOUPPER ${backend} BACKEND)
-    target_compile_definitions(${target} PRIVATE TA_BACKEND_${BACKEND}=1 TA_SEAM_CHECKS=1)
+    target_compile_definitions(${target} PRIVATE TA_BACKEND_${BACKEND}=1)
     target_link_libraries(${target} PRIVATE tieralloc_harness)
+    tieralloc_contract_semantic(${target} enforce)
     add_test(NAME ${target} COMMAND ${target})
   endforeach()
 else()
@@ -103,6 +146,7 @@ tieralloc_add_workload(chase     workloads/chase.cpp)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/micro/malloc_cost.cpp)
   add_executable(malloc-cost micro/malloc_cost.cpp)
   target_link_libraries(malloc-cost PRIVATE tieralloc_harness)
+  tieralloc_contract_semantic(malloc-cost ${TIERALLOC_CONTRACT_SEMANTIC})
 else()
   message(STATUS "bench: skipping malloc-cost (micro/malloc_cost.cpp not written yet)")
 endif()
