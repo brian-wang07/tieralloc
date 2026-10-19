@@ -22,6 +22,7 @@ LLVM style, with one deviation: variables use lowerCamelCase.
 - **Language standard:** C++26 for the bench, profiler and tooling, built with GCC 16 (one compiler for everything measured; Clang/LLVM for tooling and sanitizers only). `tieralloc.hpp` must stay C++20-compatible (its tests build at C++20).
 - **Headers:** `#pragma once`. Includes go project headers first, then standard library headers, then platform headers guarded by `#if`.
 - **Comments:** `//`, written as sentences; explain *why*, not what.
+- **Contracts:** use the macros in `bench/harness/contracts.hpp`, never raw `pre`/`post`/`contract_assert`, so Clang (clangd, sanitizer builds) still parses. `TA_PRE(cond)` and `TA_POST(r, cond)` go on declarations for interface rules; `TA_ASSERT(cond)` goes in bodies. Predicates must be cheap and side-effect free; checks that write state stay manual under `TA_SEAM_CHECKS`. Value parameters used in a `TA_POST` must be `const`. Put contracts at the seam boundary, not in each backend. Timing builds use the `ignore` semantic (`TIERALLOC_CONTRACT_SEMANTIC`); tests use `enforce`. No contracts in `tieralloc.hpp`.
 
 ## Project
 

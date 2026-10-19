@@ -23,10 +23,12 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
                  "and /proc-based RSS are Linux only. Measured results must come from Linux.")
 endif()
 
-# Flags shared by every target in the project.
+# Flags shared by every target in the project. -Werror=switch makes every
+# switch over an enum (above all, a backend's policy for each Role) fail to
+# build until it handles a newly added enumerator.
 add_library(tieralloc_options INTERFACE)
 target_compile_options(tieralloc_options INTERFACE
-  $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -fno-omit-frame-pointer>
+  $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic -Werror=switch -fno-omit-frame-pointer>
   $<$<CXX_COMPILER_ID:MSVC>:/W4>
   $<$<BOOL:${TIERALLOC_NATIVE}>:-march=native>)
 # Baked into binaries so every result file can record how it was built.

@@ -7,3 +7,14 @@ CompileFlags:
     - -fcontract-evaluation-semantic=*
     - -fcontracts*
     - -freflection
+---
+# Seam headers need exactly one TA_BACKEND_*. A header has no compile command
+# of its own, so clangd borrows one from some source file, which may have no
+# backend or a different one. Always view them as the plain backend.
+If:
+  PathMatch: bench/alloc/.*\.hpp
+CompileFlags:
+  Remove:
+    - -DTA_BACKEND_*
+  Add:
+    - -DTA_BACKEND_PLAIN=1
