@@ -372,6 +372,35 @@ struct MisalignedBackend {
 };
 static_assert(alloc::SeamBackend<MisalignedBackend>);
 
+// A backend with the optional checks (backend.hpp), to show the seam calls
+// them before pools exists: it rejects every Cold free, and every allocation
+// when rejectAllocations is set.
+struct CheckingBackend {
+  static constexpr std::string_view name = "checking";
+  static inline bool rejectAllocations = false;
+  template <Role R> static void *allocate(std::size_t bytes, std::size_t) {
+    return ::operator new(bytes == 0 ? 16 : bytes);
+  }
+  template <Role R>
+  static void deallocate(void *p, std::size_t, std::size_t) noexcept {
+    ::operator delete(p);
+  }
+  static void endPhase() noexcept {}
+  static nlohmann::ordered_json extraStats() { return {}; }
+  template <Role R>
+  static bool validAllocation(const void *, std::size_t, std::size_t) noexcept {
+    return !rejectAllocations;
+  }
+  template <Role R>
+  static bool validFree(const void *, std::size_t, std::size_t) noexcept {
+    return R != Role::Cold;
+  }
+};
+static_assert(alloc::SeamBackend<CheckingBackend> &&
+              alloc::ChecksAllocations<CheckingBackend, Role::Hot> &&
+              alloc::ChecksFrees<CheckingBackend, Role::Hot>);
+static_assert(!alloc::ChecksFrees<alloc::PlainBackend, Role::Hot>);
+
 #if defined(__linux__) || defined(__APPLE__)
 // Runs f in a forked child with stderr silenced (the violation reports would
 // drown the output) and core dumps off (systemd-coredump would otherwise store
@@ -422,6 +451,16 @@ void checkContracts() {
   checkAborts(
       pre, "postcondition: backend returns a misaligned block", noContracts,
       [] { (void)alloc::allocate<Role::Hot, MisalignedBackend>(16, 16); });
+  checkAborts(pre, "backend check: the backend rejects a free", noContracts,
+              [] {
+                void *p = alloc::allocate<Role::Cold, CheckingBackend>(16, 16);
+                alloc::deallocate<Role::Cold, CheckingBackend>(p, 16, 16);
+              });
+  checkAborts(assertsAbort(), "backend check: the backend rejects a block",
+              "assertions not checked in this build", [] {
+                CheckingBackend::rejectAllocations = true;
+                (void)alloc::allocate<Role::Hot, CheckingBackend>(16, 16);
+              });
   checkAborts(assertsAbort(), "assertion: makeAs with an out-of-range role",
               "assertions not checked in this build",
               [] { (void)alloc::makeAs<int>(static_cast<Role>(7), 1); });

@@ -13,6 +13,7 @@
 //
 // Single-threaded, like the stats it updates.
 
+#include "backend.hpp"
 #include "harness/contracts.hpp"
 #include "role.hpp"
 #include "stats.hpp"
@@ -20,7 +21,6 @@
 #include <nlohmann/json.hpp>
 
 #include <bit>
-#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -31,7 +31,6 @@
 #include <memory>
 #include <new>
 #include <string>
-#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -50,21 +49,35 @@
 
 namespace tabench::alloc {
 
-template <class B>
-concept SeamBackend = requires(void *p, std::size_t n) {
-  { B::name } -> std::convertible_to<std::string_view>;
-  { B::template allocate<Role::Default>(n, n) } -> std::same_as<void *>;
-  { B::template deallocate<Role::Default>(p, n, n) } noexcept;
-  { B::endPhase() } noexcept;
-  { B::extraStats() } -> std::same_as<nlohmann::ordered_json>;
-};
-
 #if defined(TA_BACKEND_PLAIN)
 using Backend = PlainBackend;
 #elif defined(TA_BACKEND_POOLS)
 using Backend = PoolsBackend;
 #endif
 static_assert(SeamBackend<Backend>);
+
+namespace detail {
+
+// The backend's optional checks (backend.hpp), or true when it has none.
+template <Role R, class B>
+constexpr bool backendAllocationOk(const void *p, std::size_t bytes,
+                                   std::size_t align) noexcept {
+  if constexpr (ChecksAllocations<B, R>)
+    return B::template validAllocation<R>(p, bytes, align);
+  else
+    return true;
+}
+
+template <Role R, class B>
+constexpr bool backendFreeOk(const void *p, std::size_t bytes,
+                             std::size_t align) noexcept {
+  if constexpr (ChecksFrees<B, R>)
+    return B::template validFree<R>(p, bytes, align);
+  else
+    return true;
+}
+
+} // namespace detail
 
 // what make() can build
 template <class T>
@@ -84,6 +97,10 @@ template <Role R, SeamBackend B = Backend>
             r != nullptr && reinterpret_cast<std::uintptr_t>(r) % align == 0) {
   // allocate and then record, to never count a bad_alloc
   void *p = B::template allocate<R>(bytes, align);
+  // A TA_ASSERT, not part of the TA_POST: GCC 16.2 crashes (internal compiler
+  // error in tsubst) on a postcondition that passes its result to a function
+  // template.
+  TA_ASSERT(detail::backendAllocationOk<R, B>(p, bytes, align));
   seamStats.recordAllocate<R>(bytes);
   return p;
 }
@@ -92,7 +109,8 @@ template <Role R, SeamBackend B = Backend>
 void deallocate(void *p, std::size_t bytes, std::size_t align) noexcept
     TA_PRE(p != nullptr) TA_PRE(std::has_single_bit(align))
     TA_PRE(bytes % align == 0)
-    TA_PRE(reinterpret_cast<std::uintptr_t>(p) % align == 0) {
+    TA_PRE(reinterpret_cast<std::uintptr_t>(p) % align == 0)
+    TA_PRE(detail::backendFreeOk<R, B>(p, bytes, align)) {
   // record first, so that underflow precondition fires before a bad free
   // reaches the allocator.
   seamStats.recordFree<R>(bytes);

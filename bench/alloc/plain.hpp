@@ -4,10 +4,13 @@
 // and tcmalloc. Turns a seam request into it's respective operator new/delete
 // call.
 
+#include "backend.hpp"
 #include "role.hpp"
+
+#include <nlohmann/json.hpp>
+
 #include <cstddef>
 #include <new>
-#include <nlohmann/json.hpp>
 #include <string_view>
 
 namespace tabench::alloc {
@@ -60,5 +63,6 @@ private:
     return bytes == 0 ? align : bytes;
   }
 };
+static_assert(SeamBackend<PlainBackend>);
 
 } // namespace tabench::alloc
