@@ -60,7 +60,7 @@ T *make(Args &&...args)
 
 ```cpp
 // A type's role can be declared once, and inferred for subsequent uses.
-template <> inline constexpr Role tabench::alloc::roleof<Order> = Role::Hot;
+template <> inline constexpr Role tabench::alloc::roleOf<Order> = Role::Hot;
 Order *o2 = make<Order>(1, 100, 5, 0);
 destroy(o2);
 
@@ -69,7 +69,7 @@ template <class T, tabench::alloc::Role R = tabench::alloc::roleOf<std::remove_c
 using Vector = std::vector<T, tabench::alloc::Allocator<T, R>>;
 Vector<Order *, Role::Hot> book;
 // the allocator itself is empty as well.
-static_assert(sizeof(Vector<Order *, Role::Hot> == sizeof(std::vector<Order *>)));
+static_assert(sizeof(Vector<Order *, Role::Hot>) == sizeof(std::vector<Order *>));
 ```
 |Switch|Mechanism|Picks|
 |:---:|:---:|:---:|
