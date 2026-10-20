@@ -27,6 +27,43 @@ tieralloc: C++20
 tieralloc-bench: C++23+ (concepts) - prefer C++26 to use contract assertions
 Existing allocators can be built with scripts/build-allocators.sh.
 # tieralloc-bench
+Sample results:
+![forest](docs/images/20261020-031021_forest.png)
+![rss](docs/images/20261020-031021_churn-rss.png)
+![chase](docs/images/20261020-031021_sweep-chase.png)
+## How to run
+### Setup
+Ideally run immediately off of a fresh boot. Set THP=always and cpupower frequency to performance. For lowest noise, also boot with `isolcpus=<cpu>`, keep sibling cores idle, and move irqs off of `<cpu>`.
+---
+```
+scripts/bench_run.py # 1300 runs, ~15 mins depending on system
+scripts/bench_summary.py results/<campaign> # summary.md, summary.csv, summary.json
+scripts/bench_plot.py results/<campaign> # plots/*.svg and *.png
+```
+### flags
+**scripts/bench_run.py**
+
+|Flag|Default|Meaning|
+|----|-------|-------|
+|--matrix FILE|bench/matrix.json|which campaign to run|
+|--out DIR|results/<timestamp>|output directory|
+|--runs N| 10 | repetitions per cell|
+|--cpu N| 10 | CPU to pin to|
+|--only LIST|all|only these workloads, e.g. churn, chase|
+|--dry-run||prints every command, doesnt run anything|
+|--force||run despite failed requirements (noted in results)|
+|--build DIR, --deps DIR|build, build-deps|where the binaries and allocators are|
+
+**scripts/bench_summary.py**
+|Flag|Meaning|
+|----|-------|
+|--out DIR|(summary only) write the outputs to DIR|
+|--ignore-requirements|use runs made without the required THP or cpu governor; output is marked as not valid|
+
+### running each workload seperately
+Each workload is a seperate binary, one per backend. the plain uses whatever allocator is loaded with `LD_PRELOAD`.  
+Ensure to run with `taskset -c <cpu>` to pin to isolated cpu!
+
 ## Requirements
 Linux-based system, THP=always, cpupower frequency=performance  
 
