@@ -10,8 +10,8 @@
 //   seam.end = seamStats;
 //   record["metrics"]["seam"] = toJson(seam);
 
-#include "harness/contracts.hpp"
 #include "role.hpp"
+#include "ta/contracts.hpp"
 
 #include <nlohmann/json.hpp>
 

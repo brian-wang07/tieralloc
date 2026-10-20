@@ -14,9 +14,9 @@
 // Single-threaded, like the stats it updates.
 
 #include "backend.hpp"
-#include "harness/contracts.hpp"
 #include "role.hpp"
 #include "stats.hpp"
+#include "ta/contracts.hpp"
 
 #include <nlohmann/json.hpp>
 

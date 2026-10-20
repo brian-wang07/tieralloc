@@ -5,10 +5,10 @@
 // is manually done today.
 
 #include "backend.hpp"
-#include "harness/contracts.hpp"
 #include "plain.hpp"
 #include "role.hpp"
 #include "stats.hpp"
+#include "ta/contracts.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>

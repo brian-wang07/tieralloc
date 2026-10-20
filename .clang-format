@@ -1,5 +1,5 @@
 BasedOnStyle: LLVM
-# Contract macros (bench/harness/contracts.hpp) sit after a declarator like
+# Contract macros (common/ta/contracts.hpp) sit after a declarator like
 # attributes. Without this, clang-format treats each one as a call continuing
 # the previous one and indents every further contract deeper.
 AttributeMacros: [TA_PRE, TA_POST]

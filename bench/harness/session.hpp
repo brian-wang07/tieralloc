@@ -18,13 +18,13 @@
 
 #include "args.hpp"
 #include "clock.hpp"
-#include "contracts.hpp"
 #include "counters.hpp"
 #include "memstats.hpp"
 #include "perf.hpp"
 #include "region.hpp"
 #include "report.hpp"
 #include "system.hpp"
+#include "ta/contracts.hpp"
 
 #include <cmath>
 #include <cstddef>

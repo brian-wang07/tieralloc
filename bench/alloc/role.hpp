@@ -6,7 +6,7 @@
 // explicit R) so each call compiles to one direct path; withRole() turns a
 // role known only at run time into that compile-time form.
 
-#include "harness/contracts.hpp"
+#include "ta/contracts.hpp"
 
 #include <array>
 #include <cstddef>

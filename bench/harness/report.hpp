@@ -14,12 +14,12 @@
 #include "allocator.hpp"
 #include "args.hpp"
 #include "clock.hpp"
-#include "contracts.hpp"
 #include "counters.hpp"
 #include "memstats.hpp"
 #include "perf.hpp"
 #include "region.hpp"
 #include "summary.hpp"
+#include "ta/contracts.hpp"
 
 #include <nlohmann/json.hpp>
 

@@ -5,7 +5,7 @@ find_package(Threads REQUIRED)
 add_library(tieralloc_harness INTERFACE)
 target_include_directories(tieralloc_harness INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 # dlsym (allocator detection) needs libdl on glibc older than 2.34.
-target_link_libraries(tieralloc_harness INTERFACE tieralloc_options Threads::Threads nlohmann_json
+target_link_libraries(tieralloc_harness INTERFACE tieralloc_common Threads::Threads nlohmann_json
                       ${CMAKE_DL_LIBS})
 
 # nlohmann/json, vendored single header (see third_party/VERSIONS). SYSTEM keeps
@@ -13,7 +13,7 @@ target_link_libraries(tieralloc_harness INTERFACE tieralloc_options Threads::Thr
 add_library(nlohmann_json INTERFACE)
 target_include_directories(nlohmann_json SYSTEM INTERFACE ${PROJECT_SOURCE_DIR}/third_party)
 
-# Contract checking (see harness/contracts.hpp). One setting drives three things
+# Contract checking (see common/ta/contracts.hpp). One setting drives three things
 # per target: GCC's -fcontract-evaluation-semantic, TA_CONTRACT_SEMANTIC for the
 # result record, and TA_SEAM_CHECKS for the manual checks that write state and
 # so cannot be contracts (the seam's owner thread). Workloads take the cache

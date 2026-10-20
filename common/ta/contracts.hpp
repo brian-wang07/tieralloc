@@ -1,8 +1,9 @@
 #pragma once
 
-// Macros for C++26 contract assertions (P2900), so bench code can state its
-// preconditions while still parsing on compilers without contracts: clangd and
-// clang-tidy, and Clang sanitizer builds.
+// Macros for C++26 contract assertions (P2900), shared by the bench and the
+// profiler, so project code can state its preconditions while still parsing on
+// compilers without contracts: clangd and clang-tidy, and Clang sanitizer
+// builds.
 //
 // - TA_PRE(cond) goes on a declaration, after noexcept and before the body:
 //     void *allocate(std::size_t bytes, std::size_t align)
@@ -40,7 +41,7 @@
 #define TA_ASSERT(...)                                                         \
   ((__VA_ARGS__)                                                               \
        ? static_cast<void>(0)                                                  \
-       : ::tabench::detail::assertionFailed(#__VA_ARGS__, __FILE__, __LINE__))
+       : ::ta::detail::assertionFailed(#__VA_ARGS__, __FILE__, __LINE__))
 #endif
 #endif
 
@@ -53,7 +54,7 @@
 #endif
 #endif
 
-namespace tabench::detail {
+namespace ta::detail {
 
 // Out of line so the failure path does not bloat every inlined check.
 [[noreturn, gnu::cold, gnu::noinline]] inline void
@@ -62,4 +63,4 @@ assertionFailed(const char *expression, const char *file, int line) noexcept {
   std::abort();
 }
 
-} // namespace tabench::detail
+} // namespace ta::detail

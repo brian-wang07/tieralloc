@@ -2,7 +2,7 @@
 
 // Order statistics over the samples of one run
 
-#include "contracts.hpp"
+#include "ta/contracts.hpp"
 
 #include <algorithm>
 #include <cmath>

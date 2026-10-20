@@ -37,6 +37,13 @@ target_compile_definitions(tieralloc_options INTERFACE
   TA_BUILD_TYPE="$<CONFIG>"
   TA_NATIVE=$<BOOL:${TIERALLOC_NATIVE}>)
 
+# Headers shared by the bench and the profiler (contract macros, counter reads).
+# Include as "ta/<name>.hpp". Nothing in it may allocate: the profiler's preload
+# shim uses it.
+add_library(tieralloc_common INTERFACE)
+target_include_directories(tieralloc_common INTERFACE ${PROJECT_SOURCE_DIR}/common)
+target_link_libraries(tieralloc_common INTERFACE tieralloc_options)
+
 # The library itself (include/tieralloc.hpp) arrives in M2.
 
 enable_testing()
