@@ -34,6 +34,7 @@ Sample results:
 ## How to run
 ### Setup
 Ideally run immediately off of a fresh boot. Set THP=always and cpupower frequency to performance. For lowest noise, also boot with `isolcpus=<cpu>`, keep sibling cores idle, and move irqs off of `<cpu>`.
+
 ---
 ```
 scripts/bench_run.py # 1300 runs, ~15 mins depending on system
@@ -65,7 +66,7 @@ Each workload is a seperate binary, one per backend. the plain uses whatever all
 Ensure to run with `taskset -c <cpu>` to pin to isolated cpu!
 
 ## Requirements
-Linux-based system, THP=always, cpupower frequency=performance  
+Linux-based system, THP=always, cpupower frequency=performance, Linux on x86-64, GCC 16 (C++26), CMake 4, Python 3.11+, matplotlib
 
 - The bench is built from 3 components: a workload source, a seam, and a harness.
 - A workload to be benchmarked never invokes `new` or `malloc`, and are instead dispatched by the seam.
