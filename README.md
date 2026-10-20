@@ -85,5 +85,7 @@ static_assert(sizeof(Vector<Order *, Role::Hot>) == sizeof(std::vector<Order *>)
 - All metrics are serialized into json.
 # interesting stuff to read about 
 - x86 CPUID leaves
+- Get better at TMP
+
 
 
