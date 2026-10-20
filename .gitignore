@@ -71,3 +71,7 @@ Testing/
 
 # Baseline allocator builds (scripts/build-allocators.sh)
 build-deps/
+
+# Benchmark campaigns (scripts/bench_run.py) and Python caches
+results/
+__pycache__/

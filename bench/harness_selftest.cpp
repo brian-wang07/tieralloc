@@ -697,6 +697,12 @@ void checkSession(bool requireCounters) {
                 "session", "CPU warmup converged at %.2f GHz after %.0f ms",
                 warmup["ghz"].is_number() ? warmup["ghz"].get<double>() : 0.0,
                 warmup["ms"].get<double>());
+#if defined(__linux__)
+  check(record["region"]["interrupts"].is_number() &&
+            record["region"]["contextSwitches"].is_object(),
+        "session", "region interrupts (%s) and context switches recorded",
+        record["region"]["interrupts"].dump().c_str());
+#endif
   check(record["memory"]["samples"].size() == 2 &&
             record["memory"]["droppedSamples"] == 1 &&
             record["memory"]["samples"][1]["liveBytes"] == 1,

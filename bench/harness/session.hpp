@@ -169,10 +169,23 @@ public:
     memory.startup = startup;
     memory.peakReset = resetPeakRSS();
     memory.before = readMemoryStats();
+    // Interrupts and context switches on this CPU during the region: the
+    // first thing to check when a run is slower than its cell's others.
+    const int cpu = currentCPU();
+    const std::optional<std::uint64_t> irqBefore = interruptsOn(cpu);
+    const ContextSwitches switchesBefore = contextSwitches();
     Region region(counters.get());
     region.begin();
     std::forward<Body>(body)();
     region.end();
+    const ContextSwitches switchesAfter = contextSwitches();
+    const std::optional<std::uint64_t> irqAfter = interruptsOn(cpu);
+    if (irqBefore && irqAfter)
+      interrupts = *irqAfter - *irqBefore;
+    if (switchesBefore.ok && switchesAfter.ok)
+      switches = ContextSwitches{
+          switchesAfter.voluntary - switchesBefore.voluntary,
+          switchesAfter.involuntary - switchesBefore.involuntary, true};
     memory.after = readMemoryStats();
     recalibrate(clock);
     measured = region.result();
@@ -205,6 +218,11 @@ public:
     Json j = makeRecord(name, variant, clock, overhead, counters, measured,
                         memory, arguments);
     j["memory"]["droppedSamples"] = droppedSamples;
+    j["region"]["interrupts"] = interrupts ? Json(*interrupts) : Json(nullptr);
+    j["region"]["contextSwitches"] =
+        switches.ok ? Json{{"voluntary", switches.voluntary},
+                           {"involuntary", switches.involuntary}}
+                    : Json(nullptr);
     j["system"] = toJson(readSystemInfo(measured.cpuBegin));
     j["system"]["warmup"] = toJson(warmup);
     return j;
@@ -253,6 +271,8 @@ private:
   std::vector<RSSSample> samples;
   std::size_t sampleCount{0};
   std::uint64_t droppedSamples{0};
+  std::optional<std::uint64_t> interrupts;
+  ContextSwitches switches;
 };
 
 } // namespace tabench

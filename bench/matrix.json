@@ -1,0 +1,68 @@
+{
+  "description": "M0: every workload under glibc, jemalloc, mimalloc, tcmalloc and hand-written pools with and without hints, with huge pages for every allocator.",
+  "runs": 10,
+  "cpu": 2,
+  "seed": 1,
+  "counters": "required",
+  "timeoutSeconds": 300,
+  "require": {
+    "thp": "always",
+    "governor": "performance"
+  },
+  "hugepages": true,
+  "configurations": {
+    "glibc": { "backend": "plain", "allocator": "glibc" },
+    "jemalloc": { "backend": "plain", "allocator": "jemalloc" },
+    "mimalloc": { "backend": "plain", "allocator": "mimalloc" },
+    "tcmalloc": { "backend": "plain", "allocator": "tcmalloc" },
+    "pools-hints-off": { "backend": "pools", "allocator": "glibc", "args": ["--hints=off"] },
+    "pools-hints-on": { "backend": "pools", "allocator": "glibc", "args": ["--hints=on"] }
+  },
+  "comparisons": {
+    "ablation": [["pools-hints-on", "pools-hints-off"]],
+    "context": {
+      "subject": "pools-hints-on",
+      "against": ["glibc", "jemalloc", "mimalloc", "tcmalloc"]
+    }
+  },
+  "workloads": [
+    {
+      "name": "churn",
+      "variants": [
+        { "name": "control", "args": ["--bands=16-4096"] },
+        { "name": "cycle", "args": [] },
+        { "name": "random", "args": ["--schedule=random"] }
+      ]
+    },
+    {
+      "name": "orderbook",
+      "variants": [
+        { "name": "cold-56", "args": ["--cold-bytes=56"] },
+        { "name": "cold-512", "args": ["--cold-bytes=512"] }
+      ]
+    },
+    {
+      "name": "chase",
+      "variants": [
+        { "name": "same-class", "args": ["--cold-bytes=32"] },
+        { "name": "split", "args": ["--cold-bytes=256"] },
+        {
+          "name": "same-class-sweep",
+          "args": ["--cold-bytes=32"],
+          "sweep": { "nodes": [16384, 65536, 262144, 1048576] }
+        }
+      ]
+    },
+    {
+      "name": "malloc-cost",
+      "binary": "malloc-cost",
+      "configurations": ["glibc", "jemalloc", "mimalloc", "tcmalloc"],
+      "variants": [
+        { "name": "pair", "args": ["--pattern=pair"], "sweep": { "size": [16, 64, 256, 1024, 4096] } },
+        { "name": "burst-lifo", "args": ["--pattern=burst-lifo"], "sweep": { "size": [16, 64, 256, 1024, 4096] } },
+        { "name": "burst-fifo", "args": ["--pattern=burst-fifo"], "sweep": { "size": [16, 64, 256, 1024, 4096] } },
+        { "name": "churn", "args": ["--pattern=churn"] }
+      ]
+    }
+  ]
+}

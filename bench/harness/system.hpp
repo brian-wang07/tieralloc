@@ -6,13 +6,19 @@
 
 #include "perf.hpp"
 
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
 
 #if defined(__linux__)
+#include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/utsname.h>
+#include <unistd.h>
 #endif
 
 namespace tabench {
@@ -59,6 +65,98 @@ inline std::optional<std::string> cpuModelName() {
 }
 
 } // namespace detail
+
+// All interrupts delivered to cpu so far (every row of /proc/interrupts, timer
+// included), or empty if unknown. Read just outside a region, so it must not
+// allocate: the file goes into a static buffer, parsed in place.
+inline std::optional<std::uint64_t> interruptsOn(int cpu) noexcept {
+#if defined(__linux__)
+  if (cpu < 0)
+    return std::nullopt;
+  static char buffer[1 << 18];
+  const int fd = ::open("/proc/interrupts", O_RDONLY | O_CLOEXEC);
+  if (fd < 0)
+    return std::nullopt;
+  std::size_t size = 0;
+  for (ssize_t n; size < sizeof(buffer) &&
+                  (n = ::read(fd, buffer + size, sizeof(buffer) - size)) > 0;)
+    size += static_cast<std::size_t>(n);
+  ::close(fd);
+  if (size == 0 || size == sizeof(buffer))
+    return std::nullopt; // empty, or too large to trust
+  const std::string_view text(buffer, size);
+
+  // The header names the CPU columns; find cpu's position among them.
+  const std::size_t headerEnd = text.find('\n');
+  if (headerEnd == std::string_view::npos)
+    return std::nullopt;
+  const std::string_view header = text.substr(0, headerEnd);
+  int column = -1;
+  int seen = 0;
+  for (std::size_t at = header.find("CPU"); at != std::string_view::npos;
+       at = header.find("CPU", at + 3), ++seen) {
+    std::size_t end = at + 3;
+    while (end < header.size() && header[end] >= '0' && header[end] <= '9')
+      ++end;
+    int number = 0;
+    std::from_chars(header.data() + at + 3, header.data() + end, number);
+    if (number == cpu) {
+      column = seen;
+      break;
+    }
+  }
+  if (column < 0)
+    return std::nullopt;
+
+  // Each row: "label:" then one count per CPU column (some rows have fewer).
+  std::uint64_t total = 0;
+  for (std::size_t line = headerEnd + 1; line < text.size();) {
+    std::size_t lineEnd = text.find('\n', line);
+    if (lineEnd == std::string_view::npos)
+      lineEnd = text.size();
+    const std::string_view row = text.substr(line, lineEnd - line);
+    line = lineEnd + 1;
+    const std::size_t colon = row.find(':');
+    if (colon == std::string_view::npos)
+      continue;
+    const char *p = row.data() + colon + 1;
+    const char *end = row.data() + row.size();
+    for (int c = 0; c <= column; ++c) {
+      while (p < end && *p == ' ')
+        ++p;
+      std::uint64_t value = 0;
+      auto [next, ec] = std::from_chars(p, end, value);
+      if (ec != std::errc{})
+        break;
+      if (c == column)
+        total += value;
+      p = next;
+    }
+  }
+  return total;
+#else
+  (void)cpu;
+  return std::nullopt;
+#endif
+}
+
+// This thread's context switches so far, from getrusage.
+struct ContextSwitches {
+  std::uint64_t voluntary{0};
+  std::uint64_t involuntary{0};
+  bool ok{false};
+};
+
+inline ContextSwitches contextSwitches() noexcept {
+  ContextSwitches c;
+#if defined(__linux__)
+  rusage usage{};
+  if (::getrusage(RUSAGE_THREAD, &usage) == 0)
+    c = {static_cast<std::uint64_t>(usage.ru_nvcsw),
+         static_cast<std::uint64_t>(usage.ru_nivcsw), true};
+#endif
+  return c;
+}
 
 // cpu is the CPU whose governor to report, or -1 for none.
 inline SystemInfo readSystemInfo(int cpu) {

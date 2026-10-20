@@ -56,7 +56,7 @@ namespace tabench {
 using Json = nlohmann::ordered_json;
 
 // Bump whenever a field is added, removed or changes meaning.
-inline constexpr int resultSchema = 4;
+inline constexpr int resultSchema = 5;
 
 // The allocation backend this binary was compiled for.
 constexpr const char *backendName() noexcept {

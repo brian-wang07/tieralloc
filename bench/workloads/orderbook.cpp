@@ -31,13 +31,16 @@
 #include "harness/session.hpp"
 #include "harness/summary.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <format>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -504,6 +507,31 @@ void replay(const Config &config, const Tape &tape, Book<Hints> &book,
   }
 }
 
+// Per-message latency in log-spaced buckets, 8 per octave: bucket b holds
+// [2^(b/8), 2^((b+1)/8)) ns. Small enough for every record, and enough to draw
+// the latency distribution, whose tail percentiles alone don't show its shape.
+tabench::Json latencyHistogram(std::span<const double> ns) {
+  constexpr int perOctave = 8;
+  auto bucketOf = [](double v) {
+    return static_cast<int>(
+        std::floor(std::log2(std::max(v, 1.0)) * perOctave));
+  };
+  int first = std::numeric_limits<int>::max();
+  int last = 0;
+  for (double v : ns) {
+    first = std::min(first, bucketOf(v));
+    last = std::max(last, bucketOf(v));
+  }
+  std::vector<std::uint64_t> counts(ns.empty() ? 0 : last - first + 1);
+  for (double v : ns)
+    ++counts[bucketOf(v) - first];
+  tabench::Json j;
+  j["bucketsPerOctave"] = perOctave;
+  j["firstBucket"] = ns.empty() ? 0 : first;
+  j["counts"] = counts;
+  return j;
+}
+
 tabench::Json metricsJson(const Config &config, const Tape &tape,
                           std::size_t liveOrders, std::size_t bidLevels,
                           std::size_t askLevels, std::uint64_t fills,
@@ -529,6 +557,7 @@ tabench::Json metricsJson(const Config &config, const Tape &tape,
     mix[std::string(typeNames[t])] = tape.mix[t];
   j["mix"] = mix;
   j["fills"] = fills;
+  j["latencyHistogram"] = latencyHistogram(all);
   j["nsPerMessage"] = tabench::toJson(tabench::summarize(all));
   tabench::Json perType;
   for (std::size_t t = 0; t < typeNames.size(); ++t)

@@ -1,0 +1,47 @@
+{
+  "description": "Smoke campaign for ctest: every workload once, tiny parameters, no counters, no system requirements. Checks the runner, summary and plots end to end; its numbers mean nothing.",
+  "runs": 2,
+  "cpu": null,
+  "seed": 1,
+  "counters": "off",
+  "timeoutSeconds": 60,
+  "require": {},
+  "hugepages": false,
+  "configurations": {
+    "glibc": { "backend": "plain", "allocator": "glibc" },
+    "pools-hints-off": { "backend": "pools", "allocator": "glibc", "args": ["--hints=off"] },
+    "pools-hints-on": { "backend": "pools", "allocator": "glibc", "args": ["--hints=on"] }
+  },
+  "comparisons": {
+    "ablation": [["pools-hints-on", "pools-hints-off"]],
+    "context": { "subject": "pools-hints-on", "against": ["glibc"] }
+  },
+  "workloads": [
+    {
+      "name": "churn",
+      "variants": [
+        { "name": "cycle", "args": ["--phases=10", "--phase-bytes=262144", "--band-phases=1", "--survivor-phases=3", "--warmup-ms=1"] }
+      ]
+    },
+    {
+      "name": "orderbook",
+      "variants": [
+        { "name": "cold-56", "args": ["--orders=2000", "--messages=20000", "--warmup-messages=2000", "--cold-bytes=56", "--warmup-ms=1"] }
+      ]
+    },
+    {
+      "name": "chase",
+      "variants": [
+        { "name": "same-class-sweep", "args": ["--laps=2", "--cold-bytes=32", "--warmup-ms=1"], "sweep": { "nodes": [1000, 4000] } }
+      ]
+    },
+    {
+      "name": "malloc-cost",
+      "binary": "malloc-cost",
+      "configurations": ["glibc"],
+      "variants": [
+        { "name": "pair", "args": ["--pattern=pair", "--batches=3", "--warmup=1", "--warmup-ms=1"], "sweep": { "size": [16, 64] } }
+      ]
+    }
+  ]
+}

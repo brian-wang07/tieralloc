@@ -191,3 +191,15 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/micro/malloc_cost.cpp)
 else()
   message(STATUS "bench: skipping malloc-cost (micro/malloc_cost.cpp not written yet)")
 endif()
+
+# The campaign scripts (scripts/bench_*.py): unit tests on synthetic records,
+# then a smoke campaign through the real binaries (bench/matrix-smoke.json),
+# the summary and, with matplotlib, the plots.
+find_package(Python3 3.11 COMPONENTS Interpreter)
+if(Python3_FOUND)
+  add_test(NAME bench-scripts
+           COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/scripts/test_bench.py
+                   --build ${CMAKE_BINARY_DIR})
+else()
+  message(STATUS "bench: no Python 3.11+, skipping the bench-scripts test")
+endif()
