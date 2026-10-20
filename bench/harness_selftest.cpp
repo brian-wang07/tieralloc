@@ -18,6 +18,7 @@
 #include "harness/perf.hpp"
 #include "harness/region.hpp"
 #include "harness/report.hpp"
+#include "harness/session.hpp"
 #include "harness/summary.hpp"
 
 #include <algorithm>
@@ -33,6 +34,7 @@
 #include <limits>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -640,6 +642,77 @@ void checkReport(const tabench::ClockInfo &clock,
         line.size());
 }
 
+// One full Session run, the sequence every workload uses: keys in order, the
+// system fields, RSS samples and the exit codes of run().
+void checkSession(bool requireCounters) {
+  const char *argv[] = {"prog", "--ops=2", "--warmup-ms=50", "--rss-samples=2",
+                        requireCounters ? "--counters=required"
+                                        : "--counters=on"};
+  tabench::Session session(5, argv, "selftest");
+  session.args().getU64("ops", 1);
+  session.start();
+  session.warmUpCPU();
+  session.measure([&] {
+    for (int i = 0; i < 3; ++i)
+      session.sampleRSS(static_cast<std::uint64_t>(i));
+  });
+  tabench::Json record = session.record("session");
+
+  std::vector<std::string> keys;
+  for (const auto &item : record.items())
+    keys.push_back(item.key());
+  const std::vector<std::string> expectedKeys = {
+      "schema",        "timestamp",    "workload",  "variant", "backend",
+      "ldPreload",     "allocatorEnv", "allocator", "build",   "clock",
+      "timerOverhead", "region",       "params",    "metrics", "counters",
+      "memory",        "system"};
+  check(keys == expectedKeys, "session", "record has every field, in order");
+
+  const tabench::Json &system = record["system"];
+  const tabench::Json &warmup = system["warmup"];
+#if defined(__linux__)
+  const bool systemRead = system["kernel"].is_string() &&
+                          system["thp"].is_string() &&
+                          system["cpuModel"].is_string();
+#else
+  const bool systemRead = true;
+#endif
+  check(systemRead, "session", "system: %s, kernel %s, thp %s, governor %s",
+        system["cpuModel"].is_string()
+            ? system["cpuModel"].get<std::string>().c_str()
+            : "?",
+        system["kernel"].is_string()
+            ? system["kernel"].get<std::string>().c_str()
+            : "?",
+        system["thp"].is_string() ? system["thp"].get<std::string>().c_str()
+                                  : "?",
+        system["governor"].is_string()
+            ? system["governor"].get<std::string>().c_str()
+            : "?");
+  if (warmup["converged"].is_null())
+    std::printf("SKIP  session   warmup convergence (no counters)\n");
+  else
+    checkTiming(warmup["converged"].get<bool>() && warmup["ghz"].is_number() &&
+                    warmup["ms"].get<double>() >= 50.0,
+                "session", "CPU warmup converged at %.2f GHz after %.0f ms",
+                warmup["ghz"].is_number() ? warmup["ghz"].get<double>() : 0.0,
+                warmup["ms"].get<double>());
+  check(record["memory"]["samples"].size() == 2 &&
+            record["memory"]["droppedSamples"] == 1 &&
+            record["memory"]["samples"][1]["liveBytes"] == 1,
+        "session", "RSS samples kept up to capacity, the rest counted");
+
+  const char *badArgv[] = {"prog", "--bogus=1"};
+  const int badArgs = tabench::Session::run("selftest", [&] {
+    tabench::Session bad(2, badArgv, "selftest");
+    bad.start();
+  });
+  const int failed = tabench::Session::run(
+      "selftest", [] { throw std::runtime_error("expected failure"); });
+  check(badArgs == 2 && failed == 1, "session",
+        "run() exits 2 for a bad flag, 1 for a failure");
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -736,6 +809,12 @@ int main(int argc, char **argv) {
   tabench::recalibrate(clock);
   checkTiming(std::abs(clock.drift()) <= maxDrift, "drift",
               "start/end rate differ by %.2e", clock.drift());
+
+#if defined(__linux__)
+  // Before the report check opens its group: a second pinned group may not fit
+  // on the PMU, and the session's would then never be scheduled.
+  checkSession(requireCounters);
+#endif
 
   // The report check goes through openCounters(), the path workloads use.
   tabench::Counters counters =

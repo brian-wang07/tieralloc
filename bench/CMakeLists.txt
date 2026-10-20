@@ -75,20 +75,37 @@ set(TIERALLOC_BENCH_BACKENDS plain pools)
 
 message(STATUS "bench backends: ${TIERALLOC_BENCH_BACKENDS}")
 
-# tieralloc_add_workload(<name> <source>) -> bin/<name>-<backend> for each backend.
+# tieralloc_add_workload(<name> <source> [SMOKE <args>...])
+#   -> bin/<name>-<backend> for each backend, built with the timing semantic,
+#   and bin/<name>-<backend>-checked with contracts and seam checks enforced.
+#   ctest runs only the checked builds, with SMOKE's small parameters, so a
+#   workload that frees with the wrong role or size fails a test instead of
+#   passing silently in a timing build.
 # Sources not written yet are skipped so the tree configures while M0 is in progress.
 function(tieralloc_add_workload name source)
+  cmake_parse_arguments(PARSE_ARGV 2 workload "" "" "SMOKE")
   if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${source})
     message(STATUS "bench: skipping ${name} (${source} not written yet)")
     return()
   endif()
   foreach(backend IN LISTS TIERALLOC_BENCH_BACKENDS)
-    set(target ${name}-${backend})
-    add_executable(${target} ${source})
     string(TOUPPER ${backend} BACKEND)
-    target_compile_definitions(${target} PRIVATE TA_BACKEND_${BACKEND}=1)
-    target_link_libraries(${target} PRIVATE tieralloc_harness)
-    tieralloc_contract_semantic(${target} ${TIERALLOC_CONTRACT_SEMANTIC})
+    foreach(kind timing checked)
+      if(kind STREQUAL "timing")
+        set(target ${name}-${backend})
+        set(semantic ${TIERALLOC_CONTRACT_SEMANTIC})
+      else()
+        set(target ${name}-${backend}-checked)
+        set(semantic enforce)
+      endif()
+      add_executable(${target} ${source})
+      target_compile_definitions(${target} PRIVATE TA_BACKEND_${BACKEND}=1)
+      target_link_libraries(${target} PRIVATE tieralloc_harness)
+      tieralloc_contract_semantic(${target} ${semantic})
+    endforeach()
+    add_test(NAME ${name}-${backend}
+             COMMAND ${name}-${backend}-checked ${workload_SMOKE}
+                     --counters=off --warmup-ms=10 --out=/dev/null)
   endforeach()
 endfunction()
 
@@ -151,7 +168,8 @@ if(TARGET seam-test-plain AND EXISTS ${TIERALLOC_DEPS_MANIFEST})
   message(STATUS "bench: seam tests under preload: ${preloaded}")
 endif()
 
-tieralloc_add_workload(churn     workloads/churn.cpp)
+tieralloc_add_workload(churn workloads/churn.cpp
+  SMOKE --phases=10 --phase-bytes=262144 --band-phases=1 --survivor-phases=3)
 tieralloc_add_workload(orderbook workloads/orderbook.cpp)
 tieralloc_add_workload(chase     workloads/chase.cpp)
 
@@ -164,7 +182,8 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/micro/malloc_cost.cpp)
   foreach(pattern pair burst-lifo burst-fifo churn)
     add_test(NAME malloc-cost-${pattern}
              COMMAND malloc-cost --pattern=${pattern} --batches=3
-                     --ops-per-batch=256 --warmup=1 --counters=off)
+                     --ops-per-batch=256 --warmup=1 --counters=off
+                     --warmup-ms=10)
   endforeach()
 else()
   message(STATUS "bench: skipping malloc-cost (micro/malloc_cost.cpp not written yet)")

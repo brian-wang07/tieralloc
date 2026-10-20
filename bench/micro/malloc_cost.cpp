@@ -3,10 +3,10 @@
 
 #include "harness/args.hpp"
 #include "harness/clock.hpp"
-#include "harness/counters.hpp"
-#include "harness/memstats.hpp"
+#include "harness/perf.hpp"
 #include "harness/region.hpp"
 #include "harness/report.hpp"
+#include "harness/session.hpp"
 #include "harness/summary.hpp"
 
 #include <algorithm>
@@ -16,7 +16,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <exception>
 #include <format>
 #include <limits>
 #include <new>
@@ -61,9 +60,6 @@ struct Config {
   std::size_t batches;
   std::size_t warmup;
   std::uint64_t seed = 0;
-  std::string_view out;
-  tabench::CounterMode counters;
-  tabench::TableChoice table;
 };
 
 std::size_t getSize(tabench::Args &args, std::string_view key,
@@ -104,22 +100,6 @@ Config parseConfig(tabench::Args &args) {
   config.opsPerBatch = getSize(args, "ops-per-batch", 1024);
   config.batches = getSize(args, "batches", 1000);
   config.warmup = getSize(args, "warmup", 10);
-  config.out = args.getString("out", "");
-
-  const std::string_view counters = args.getString("counters", "on");
-  const std::optional<tabench::CounterMode> mode =
-      tabench::parseCounterMode(counters);
-  if (!mode)
-    throw tabench::ArgError(std::format(
-        "--counters must be off, on or required (got '{}')", counters));
-  config.counters = *mode;
-  const std::string_view table = args.getString("counter-table", "auto");
-  const std::optional<tabench::TableChoice> choice =
-      tabench::parseTableChoice(table);
-  if (!choice)
-    throw tabench::ArgError(std::format(
-        "--counter-table must be auto, raw or generic (got '{}')", table));
-  config.table = *choice;
 
   // The touch writes one word, and the churn plan stores sizes and victims as
   // 32-bit values.
@@ -299,29 +279,32 @@ std::vector<double> nsPerOp(std::span<const std::uint64_t> ticks,
   return ns;
 }
 
-tabench::Json metricsJson(const Config &config, const tabench::Summary &ns) {
+// cyclesPerOp doesn't depend on the clock speed, so it is the steadier number
+// to compare; null without counters.
+tabench::Json metricsJson(const Config &config, const tabench::Summary &ns,
+                          const tabench::RegionResult &region) {
+  const std::size_t ops = config.batches * config.opsPerBatch;
   tabench::Json j;
-  j["ops"] = config.batches * config.opsPerBatch;
+  j["ops"] = ops;
   j["touch"] = "word";
   j["nsPerOp"] = tabench::toJson(ns);
+  const std::optional<tabench::CounterResult> counted = region.counters();
+  j["cyclesPerOp"] =
+      counted && counted->status == tabench::CounterStatus::Ok
+          ? tabench::Json(
+                static_cast<double>(counted->value(tabench::Counter::Cycles)) /
+                static_cast<double>(ops))
+          : tabench::Json(nullptr);
   return j;
 }
 
 } // namespace
 
 int main(int argc, char **argv) {
-  // before anything allocates: the baseline the summary subtracts.
-  const tabench::MemoryStats startup = tabench::readMemoryStats();
-  try {
-    tabench::Args args(argc, argv);
-    const Config config = parseConfig(args);
-    args.checkAllUsed();
-
-    tabench::ClockInfo clock = tabench::calibrate();
-    const tabench::TimerOverhead overhead = tabench::measureTimerOverhead();
-    // regions hold a pointer into counters, so it stays put from here on.
-    tabench::Counters counters =
-        tabench::openCounters(config.counters, config.table);
+  return tabench::Session::run("malloc-cost", [&] {
+    tabench::Session session(argc, argv, "malloc-cost");
+    const Config config = parseConfig(session.args());
+    session.start();
 
     // everything the timed loops read is built here, untimed.
     const bool churn = config.pattern == Pattern::Churn;
@@ -332,36 +315,20 @@ int main(int argc, char **argv) {
     std::vector<std::uint64_t> warmupTicks(config.warmup);
     std::vector<std::uint64_t> ticks(config.batches);
 
+    session.warmUpCPU();
     // outside the region, so its counters cover exactly the measured ops.
     if (config.warmup > 0)
       runPattern(config, plan, blocks, warmupTicks);
 
-    tabench::MemoryReport memory;
-    memory.startup = startup;
-    memory.peakReset = tabench::resetPeakRSS();
-    memory.before = tabench::readMemoryStats();
-    tabench::Region region(counters.get());
-    region.begin();
-    runPattern(config, plan, blocks, ticks);
-    region.end();
-    memory.after = tabench::readMemoryStats();
-    tabench::recalibrate(clock);
+    session.measure([&] { runPattern(config, plan, blocks, ticks); });
     // after the snapshot, so memory shows the steady state with the live set.
     freeBlocks(blocks);
 
-    std::vector<double> ns = nsPerOp(ticks, config.opsPerBatch, clock);
+    std::vector<double> ns =
+        nsPerOp(ticks, config.opsPerBatch, session.clockInfo());
     const tabench::Summary summary = tabench::summarize(ns);
-    tabench::Json record =
-        tabench::makeRecord("malloc-cost", toString(config.pattern), clock,
-                            overhead, counters, region.result(), memory, args);
-    record["metrics"] = metricsJson(config, summary);
-    tabench::writeRecord(record, config.out);
-    return 0;
-  } catch (const tabench::ArgError &e) {
-    std::fprintf(stderr, "malloc-cost: %s\n", e.what());
-    return 2;
-  } catch (const std::exception &e) {
-    std::fprintf(stderr, "malloc-cost: %s\n", e.what());
-    return 1;
-  }
+    tabench::Json record = session.record(toString(config.pattern));
+    record["metrics"] = metricsJson(config, summary, session.region());
+    session.write(record);
+  });
 }
