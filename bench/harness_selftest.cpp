@@ -18,6 +18,7 @@
 #include "harness/perf.hpp"
 #include "harness/region.hpp"
 #include "harness/report.hpp"
+#include "harness/summary.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -143,6 +144,28 @@ template <class Fn> std::string argErrorFrom(Fn &&fn) {
     return e.what();
   }
   return "";
+}
+
+void checkSummary() {
+  std::vector<double> one{7.0};
+  tabench::Summary s = tabench::summarize(one);
+  check(s.count == 1 && s.min == 7.0 && s.p50 == 7.0 && s.p99 == 7.0 &&
+            s.max == 7.0 && s.mean == 7.0,
+        "summary", "a single value is every statistic");
+
+  // Unsorted on purpose: summarize sorts.
+  std::vector<double> four{3.0, 1.0, 4.0, 2.0};
+  s = tabench::summarize(four);
+  check(s.min == 1.0 && s.p50 == 2.5 && s.max == 4.0 && s.mean == 2.5 &&
+            std::ranges::is_sorted(four),
+        "summary", "p50 of an even count is the midpoint; values end sorted");
+
+  // Rank 0.99 * 99 = 98.01 lies between 99 and 100.
+  std::vector<double> hundred(100);
+  std::iota(hundred.rbegin(), hundred.rend(), 1.0);
+  s = tabench::summarize(hundred);
+  check(std::abs(s.p99 - 99.01) < 1e-9 && s.p50 == 50.5 && s.mean == 50.5,
+        "summary", "p99 of 1..100 interpolates to %.2f", s.p99);
 }
 
 void checkArgs() {
@@ -584,9 +607,10 @@ void checkReport(const tabench::ClockInfo &clock,
   for (const auto &item : record.items())
     keys.push_back(item.key());
   const std::vector<std::string> expectedKeys = {
-      "schema",    "timestamp", "workload", "variant",  "backend",
-      "ldPreload", "allocator", "build",    "clock",    "timerOverhead",
-      "region",    "params",    "metrics",  "counters", "memory"};
+      "schema",  "timestamp", "workload",      "variant",
+      "backend", "ldPreload", "allocatorEnv",  "allocator",
+      "build",   "clock",     "timerOverhead", "region",
+      "params",  "metrics",   "counters",      "memory"};
   check(keys == expectedKeys, "report", "common fields present, in order");
 
   std::filesystem::path path =
@@ -689,6 +713,7 @@ int main(int argc, char **argv) {
               overhead.meanTicks, overhead.meanTicks / clock.ticksPerNs);
 
   checkArgs();
+  checkSummary();
 
   tabench::AllocatorInfo allocator = tabench::detectAllocator();
   if (expectedAllocator.empty())

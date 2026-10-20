@@ -131,8 +131,20 @@ if(TARGET seam-test-plain AND EXISTS ${TIERALLOC_DEPS_MANIFEST})
       message(WARNING "bench: ${allocator} library missing (${library}); rerun build-allocators.sh")
       continue()
     endif()
+    # The allocator's runEnv (e.g. tcmalloc's), so tests run as the matrix does.
+    set(runEnv "")
+    string(JSON runEnvCount ERROR_VARIABLE noRunEnv LENGTH "${manifest}"
+           allocators ${allocator} runEnv)
+    if(NOT noRunEnv AND runEnvCount GREATER 0)
+      math(EXPR lastRunEnv "${runEnvCount} - 1")
+      foreach(j RANGE ${lastRunEnv})
+        string(JSON name MEMBER "${manifest}" allocators ${allocator} runEnv ${j})
+        string(JSON value GET "${manifest}" allocators ${allocator} runEnv ${name})
+        list(APPEND runEnv "${name}=${value}")
+      endforeach()
+    endif()
     add_test(NAME seam-test-plain-${allocator}
-             COMMAND ${CMAKE_COMMAND} -E env LD_PRELOAD=${library}
+             COMMAND ${CMAKE_COMMAND} -E env LD_PRELOAD=${library} ${runEnv}
                      $<TARGET_FILE:seam-test-plain> --expect-allocator=${allocator})
     list(APPEND preloaded ${allocator})
   endforeach()
@@ -148,6 +160,12 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/micro/malloc_cost.cpp)
   add_executable(malloc-cost micro/malloc_cost.cpp)
   target_link_libraries(malloc-cost PRIVATE tieralloc_harness)
   tieralloc_contract_semantic(malloc-cost ${TIERALLOC_CONTRACT_SEMANTIC})
+  # Smoke tests: each pattern runs and writes a record. Never timing checks.
+  foreach(pattern pair burst-lifo burst-fifo churn)
+    add_test(NAME malloc-cost-${pattern}
+             COMMAND malloc-cost --pattern=${pattern} --batches=3
+                     --ops-per-batch=256 --warmup=1 --counters=off)
+  endforeach()
 else()
   message(STATUS "bench: skipping malloc-cost (micro/malloc_cost.cpp not written yet)")
 endif()

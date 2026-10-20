@@ -19,9 +19,12 @@
 #include "memstats.hpp"
 #include "perf.hpp"
 #include "region.hpp"
+#include "summary.hpp"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -31,6 +34,11 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
+
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 // Defined by CMake (tieralloc_options); fallbacks for builds outside it.
 #ifndef TA_COMPILER
@@ -48,7 +56,7 @@ namespace tabench {
 using Json = nlohmann::ordered_json;
 
 // Bump whenever a field is added, removed or changes meaning.
-inline constexpr int resultSchema = 2;
+inline constexpr int resultSchema = 3;
 
 // The allocation backend this binary was compiled for.
 constexpr const char *backendName() noexcept {
@@ -67,6 +75,33 @@ inline Json envOrNull(const char *name) {
 }
 
 // ISO 8601, e.g. "2026-10-17T02:30:00Z".
+// The allocator tuning variables set for this run (glibc tunables, jemalloc's
+// MALLOC_CONF, MIMALLOC_*, TCMALLOC_*), sorted by name. The runner applies
+// them from the manifest; recording them shows what a result ran with.
+inline Json allocatorEnv() {
+  Json j = Json::object();
+#if defined(__linux__)
+  constexpr std::array<std::string_view, 4> prefixes{
+      "GLIBC_TUNABLES=", "MALLOC_CONF=", "MIMALLOC_", "TCMALLOC_"};
+  std::vector<std::string_view> settings;
+  for (char **entry = environ; *entry != nullptr; ++entry) {
+    std::string_view setting(*entry);
+    for (std::string_view prefix : prefixes)
+      if (setting.starts_with(prefix)) {
+        settings.push_back(setting);
+        break;
+      }
+  }
+  std::ranges::sort(settings);
+  for (std::string_view setting : settings) {
+    const std::size_t equals = setting.find('=');
+    j[std::string(setting.substr(0, equals))] =
+        std::string(setting.substr(equals + 1));
+  }
+#endif
+  return j;
+}
+
 inline std::string utcTimestamp() {
   std::time_t now = std::time(nullptr);
   std::tm utc{};
@@ -176,6 +211,17 @@ inline Json toJson(const MemoryStats &m) {
   return j;
 }
 
+inline Json toJson(const Summary &s) {
+  Json j;
+  j["count"] = s.count;
+  j["min"] = s.min;
+  j["p50"] = s.p50;
+  j["p99"] = s.p99;
+  j["max"] = s.max;
+  j["mean"] = s.mean;
+  return j;
+}
+
 // Ticks are absolute; convert differences with clock.ticksPerNs.
 inline Json toJson(const RSSSample &s) {
   if (!s.ok)
@@ -223,6 +269,7 @@ inline Json makeRecord(std::string_view workload, std::string_view variant,
   j["variant"] = variant;
   j["backend"] = backendName();
   j["ldPreload"] = envOrNull("LD_PRELOAD");
+  j["allocatorEnv"] = allocatorEnv();
   AllocatorInfo allocator = detectAllocator();
   j["allocator"]["name"] = allocator.name;
   j["allocator"]["version"] = allocator.version;

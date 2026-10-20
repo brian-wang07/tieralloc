@@ -8,6 +8,10 @@
 # allocator's hugepage environment and the runner applies it per
 # configuration. The matrix itself runs with system THP set to "always".
 #
+# runEnv in the manifest is different: an allocator needs it in every run, with
+# or without huge pages. When both set GLIBC_TUNABLES, the runner joins them
+# with ':'.
+#
 # Usage: scripts/build-allocators.sh [--prefix=DIR] [--jobs=N]
 #          [--only=jemalloc,mimalloc,tcmalloc] [--force] [--selftest=PATH]
 #
@@ -34,6 +38,12 @@ GLIBC_HUGEPAGE_ENV='GLIBC_TUNABLES=glibc.malloc.hugetlb=1'
 # abort_conf makes an option 5.4.0 no longer knows abort instead of warn.
 JEMALLOC_HUGEPAGE_ENV='MALLOC_CONF=thp:always,metadata_thp:always,abort_conf:true'
 MIMALLOC_HUGEPAGE_ENV='MIMALLOC_ALLOW_LARGE_OS_PAGES=1'
+
+# Environment an allocator needs in every run, recorded in the manifest as
+# runEnv. glibc 2.35+ registers rseq for each thread, which keeps tcmalloc from
+# registering its own and so from using its per-CPU caches: it silently runs a
+# slower path (measured: 241 vs 102 instructions per new/delete pair).
+TCMALLOC_RUN_ENV='GLIBC_TUNABLES=glibc.pthread.rseq=0'
 
 # Exported by every working malloc replacement; checked with nm -D.
 REQUIRED_SYMBOLS=(malloc free calloc realloc posix_memalign aligned_alloc
@@ -112,11 +122,12 @@ check_symbols() {
 }
 
 # Runs the harness selftest with the library preloaded, plain and with its
-# hugepage environment, and requires it to report the expected allocator.
+# hugepage environment (each on top of its run environment), and requires it to
+# report the expected allocator.
 # Timing checks are skipped (they measure the machine, not the allocator) and
 # counter checks skip themselves if counters are unavailable.
 smoke_test() {
-  local name=$1 lib=$2 hugepage_env=$3
+  local name=$1 lib=$2 hugepage_env=$3 run_env=${4:-}
   local cpu=$(($(nproc) - 1))
   local logfile=$PREFIX/logs/$name-selftest.log
   : >"$logfile"
@@ -124,9 +135,10 @@ smoke_test() {
   if [[ -n $hugepage_env ]]; then settings+=("$hugepage_env"); fi
   for env_setting in "${settings[@]}"; do
     local -a env_args=()
-    if [[ -n $env_setting ]]; then env_args=("$env_setting"); fi
+    if [[ -n $run_env ]]; then env_args+=("$run_env"); fi
+    if [[ -n $env_setting ]]; then env_args+=("$env_setting"); fi
     {
-      echo "### LD_PRELOAD=$lib ${env_setting:-(no hugepage env)}"
+      echo "### LD_PRELOAD=$lib ${run_env:+$run_env }${env_setting:-(no hugepage env)}"
     } >>"$logfile"
     if ! env "${env_args[@]}" LD_PRELOAD="$lib" taskset -c "$cpu" \
       "$SELFTEST" --expect-allocator="$name" --no-timing >>"$logfile" 2>&1; then
@@ -291,7 +303,7 @@ build_tcmalloc() {
   cp "$built" "$lib"
   chmod u+w "$lib"
   check_symbols "$lib"
-  smoke_test tcmalloc "$lib" ""
+  smoke_test tcmalloc "$lib" "" "$TCMALLOC_RUN_ENV"
   write_info tcmalloc name=tcmalloc version="${TCMALLOC_COMMIT:0:12}" pin="$pin" \
     source="https://github.com/google/tcmalloc@$TCMALLOC_COMMIT" library="$lib" \
     buildFlags="$bazel_flags (bazel $bazel_version)" compiler="$(compiler_id)" \
@@ -306,20 +318,27 @@ record_glibc() {
     library="" buildFlags="" compiler="" hugepageEnv="$GLIBC_HUGEPAGE_ENV"
 }
 
+# runEnv comes from this script, not from build-info.json, so changing it takes
+# effect without rebuilding the allocator.
 write_manifest() {
-  python3 -I - "$PREFIX" <<'EOF'
+  python3 -I - "$PREFIX" "tcmalloc=$TCMALLOC_RUN_ENV" <<'EOF'
 import json, pathlib, sys
 prefix = pathlib.Path(sys.argv[1])
+run_envs = dict(arg.split("=", 1) for arg in sys.argv[2:])
+
+def settings(text):
+    return dict(setting.split("=", 1) for setting in [text] if setting)
+
 allocators = {}
 for info in sorted(prefix.glob("lib/*/build-info.json")):
     entry = json.loads(info.read_text())
     entry.pop("pin", None)
-    entry["hugepageEnv"] = dict(
-        setting.split("=", 1) for setting in [entry["hugepageEnv"]] if setting)
+    entry["hugepageEnv"] = settings(entry["hugepageEnv"])
+    entry["runEnv"] = settings(run_envs.get(entry["name"], ""))
     entry["library"] = entry["library"] or None
     allocators[entry.pop("name")] = entry
 (prefix / "manifest.json").write_text(
-    json.dumps({"schema": 1, "allocators": allocators}, indent=2) + "\n")
+    json.dumps({"schema": 2, "allocators": allocators}, indent=2) + "\n")
 EOF
 }
 
