@@ -27,6 +27,9 @@ tieralloc: C++20
 tieralloc-bench: C++23+ (concepts) - prefer C++26 to use contract assertions
 Existing allocators can be built with scripts/build-allocators.sh.
 # tieralloc-bench
+## Requirements
+Linux-based system, THP=always, cpupower frequency=performance  
+
 - The bench is built from 3 components: a workload source, a seam, and a harness.
 - A workload to be benchmarked never invokes `new` or `malloc`, and are instead dispatched by the seam.
 - Each allocation carries a role: one of Default, Hot, Transient, or Cold. These are standins for the hints that tieralloc will eventually take.
@@ -83,9 +86,35 @@ static_assert(sizeof(Vector<Order *, Role::Hot>) == sizeof(std::vector<Order *>)
   - Memory usage from `/proc`.
   - The CPU that ran the program is also recorded at begin and end, to ensure that unpinned runs that changed cpus is noted.
 - All metrics are serialized into json.
+
+TODO: Add info on how pool allocator works
+
+## churn benchmark
+The churn benchmarks stress test allocator free policies by inducing fragmentation: in a loop, it allocates some objects and then frees a selected subset of them. If the hypothesis were to hold, marking the survivors as long-lasting would be expected to drastically reduce RSS.
+### binaries
+|Binary|Backend|Use|
+|:---:|:---:|:---:|
+|`churn-plain`|`operator new`, i.e. whichever allocator is preloaded|glibc, jemalloc, mimalloc, tcmalloc|
+|`churn-pools`|Hot pool and transient arena, glibc for rest|Config 6 (hand-written pool performance)|
+|`churn-pools-checked`<br>`churn-plain-checked`|Contracts and seam checks enforced|Debug build|
+
+Run with `taskset -c <cpu> build/bin/churn-*` to pin to a single cpu for the entire run. Allocators also have some additional configuration options available, in `build-deps/manifest.json` - note that tcmalloc requires
+```
+GLIB_TUNABLES=glibc.pthread.rseq=0
+```
+before running so it doesnt silently run without per-CPU caches. Note that this is only for plain: pools always use glibc.  
+
 # interesting stuff to read about 
 - x86 CPUID leaves
 - Get better at TMP
+## other stuff
+Churn benchmark: One issue that was prevalent when implementing the churn workload benchmark (allocate/free many objects of varying sizes and lifetime to induce heap fragmentation and visualize RSS growth) was accurately showing natural RSS growth. The environment is setup so that each "run" is a seperate process - it starts with an empty heap and goes through a fixed number of **phases** (e.g. 60). Each phase:
+- Frees the oldest survivors (e.g. ones created >= 8 phases ago)
+- Allocates a fixed number of bytes (e.g. 64MiB)
+- samples RSS at the peak
+- Randomly selects most (~95%) of this phase's objects by random and frees them.
+The survivors are kept and the RSS is sampled once again (phase's trough): per the hypothesis, this should ideally decrease the RSS proportional to the amount of bytes freed (assuming that objects were placed ideally). The issue with this workload is the fact that survivors pin the page that they sit on, and thus if the next phase requests similar sizes then the holes around the survivors just get filled. This was seen in a preliminary run of this workload, when all peak sizes were seen to be equal to the trough as new allocations were placed on the same page as the survivors. This ignores the point of this test: When the size changes the holes become useless as they are not big enough to to serve the new objects, and thus the allocator must request more memory. This is the overhead that is to be measured. 
 
+The fix was quite simple; change the size of the object created per phase. two configs were added: a sawtooth config, where the band size will increase linearly up to a point and reset back to the minimum, and a random config which selects sizes by random. for General purpose allocators, we would expect the RSS to grow much larger than the portion of the heap in use (as survivors pin whole pages), whereas through lifetime segregation survivors that are explicitly tagged as long lasting are densely packed into much fewer pages.
 
 
