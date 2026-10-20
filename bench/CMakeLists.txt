@@ -170,8 +170,11 @@ endif()
 
 tieralloc_add_workload(churn workloads/churn.cpp
   SMOKE --phases=10 --phase-bytes=262144 --band-phases=1 --survivor-phases=3)
-tieralloc_add_workload(orderbook workloads/orderbook.cpp)
-tieralloc_add_workload(chase     workloads/chase.cpp)
+tieralloc_add_workload(orderbook workloads/orderbook.cpp
+  SMOKE --orders=2000 --messages=20000 --warmup-messages=2000
+        --phase-messages=1000 --sample-messages=5000)
+tieralloc_add_workload(chase workloads/chase.cpp
+  SMOKE --nodes=2000 --laps=2)
 
 # Raw malloc/free cost. Only the plain backend: allocators are swapped via LD_PRELOAD.
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/micro/malloc_cost.cpp)
