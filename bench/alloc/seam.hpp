@@ -52,7 +52,7 @@ namespace tabench::alloc {
 #if defined(TA_BACKEND_PLAIN)
 using Backend = PlainBackend;
 #elif defined(TA_BACKEND_POOLS)
-using Backend = PoolsBackend;
+using Backend = pools::PoolsBackend;
 #endif
 static_assert(SeamBackend<Backend>);
 

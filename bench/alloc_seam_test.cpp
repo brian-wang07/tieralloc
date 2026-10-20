@@ -23,9 +23,11 @@
 #include <memory>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #if defined(__linux__) || defined(__APPLE__)
@@ -351,6 +353,195 @@ void checkRuntimeRoles() {
         "make/destroy of a const T, and destroy(nullptr) is a no-op");
 }
 
+#if defined(TA_BACKEND_POOLS)
+// Pools-only checks. Earlier checks have already used the pools, so every
+// check here compares against a snapshot or picks state it can rely on, never
+// absolute counts.
+namespace pools = tabench::alloc::pools;
+
+// A class with an empty free list, so its next allocations are bumped.
+std::uint8_t classWithoutFreeSlots() {
+  for (std::size_t i = pools::hotClassCount; i-- > 0;)
+    if (pools::hotClasses.classes[i].freeList == nullptr)
+      return static_cast<std::uint8_t>(i);
+  return 0;
+}
+
+std::uintptr_t pageOf(const void *p) {
+  return reinterpret_cast<std::uintptr_t>(p) & ~(pools::pageBytes - 1);
+}
+
+void checkHotPool() {
+  // LIFO: the slot freed last is the next one handed out.
+  void *a = alloc::allocate<Role::Hot>(48, 16);
+  alloc::deallocate<Role::Hot>(a, 48, 16);
+  void *again = alloc::allocate<Role::Hot>(48, 16);
+  check(again == a, "pools", "hot: a freed slot is reused first (LIFO)");
+  alloc::deallocate<Role::Hot>(again, 48, 16);
+
+  // Density: bumped slots of one class are adjacent, unless a page ran out
+  // between them.
+  const std::uint8_t index = classWithoutFreeSlots();
+  const std::size_t slot = pools::slotBytes(index);
+  const bool bumped = pools::hotClasses.classes[index].freeList == nullptr;
+  auto *first = static_cast<std::byte *>(alloc::allocate<Role::Hot>(slot, 16));
+  auto *second = static_cast<std::byte *>(alloc::allocate<Role::Hot>(slot, 16));
+  const bool newPage = pageOf(second) != pageOf(first);
+  check(bumped && (newPage || second == first + slot), "pools",
+        "hot: consecutive %zu B slots are adjacent", slot);
+
+  // Every block sits in a page of its own class, and classes don't share
+  // pages.
+  void *small = alloc::allocate<Role::Hot>(16, 16);
+  void *large = alloc::allocate<Role::Hot>(1024, 16);
+  check(pools::hotSegments.classOf(small) == pools::hotClassFor(16) &&
+            pools::hotSegments.classOf(large) == pools::hotClassFor(1024) &&
+            pools::hotSegments.classOf(first) == index &&
+            pageOf(small) != pageOf(large),
+        "pools", "hot: each block is in a page owned by its size class");
+
+  // Classes share segments: a new segment is only taken when the last one is
+  // full, so segments = ceil(pages / pagesPerSegment).
+  std::uint64_t pages = 0;
+  for (const pools::Segment &s : pools::hotSegments.used())
+    pages += s.usedPages;
+  const std::uint64_t perSegment = pools::pagesPerSegment;
+  check(pools::hotSegments.count == (pages + perSegment - 1) / perSegment,
+        "pools", "hot: %llu pages packed into %zu shared segments",
+        static_cast<unsigned long long>(pages), pools::hotSegments.count);
+
+  alloc::deallocate<Role::Hot>(large, 1024, 16);
+  alloc::deallocate<Role::Hot>(small, 16, 16);
+  alloc::deallocate<Role::Hot>(second, slot, 16);
+  alloc::deallocate<Role::Hot>(first, slot, 16);
+}
+
+void checkArena() {
+  pools::TransientArena &arena = pools::transientArena;
+  if (arena.liveCount != 0) {
+    check(false, "pools", "arena: no transient blocks live before the check");
+    return;
+  }
+
+  // A live block skips the reset, so the arena keeps growing.
+  const std::uint64_t resets = arena.resets;
+  const std::uint64_t skipped = arena.skippedResets;
+  void *live = alloc::allocate<Role::Transient>(64, 64);
+  alloc::endPhase();
+  void *next = alloc::allocate<Role::Transient>(64, 64);
+  check(arena.skippedResets == skipped + 1 && arena.resets == resets &&
+            next != live,
+        "pools", "arena: a live block skips the reset");
+
+  // Once everything is dead, the reset hands out chunk 0 from its start.
+  alloc::deallocate<Role::Transient>(next, 64, 64);
+  alloc::deallocate<Role::Transient>(live, 64, 64);
+  alloc::endPhase();
+  void *reused = alloc::allocate<Role::Transient>(64, 64);
+  check(arena.resets == resets + 1 && reused == arena.chunks[0], "pools",
+        "arena: an empty arena resets and reuses its memory");
+  alloc::deallocate<Role::Transient>(reused, 64, 64);
+
+  // More than a chunk's worth: blocks move on to the next chunk instead of
+  // crossing its end.
+  constexpr std::size_t blockBytes = 48 * 1024;
+  std::vector<void *> blocks;
+  for (std::size_t total = 0; total < 2 * pools::arenaChunkBytes;
+       total += blockBytes)
+    blocks.push_back(alloc::allocate<Role::Transient>(blockBytes, 64));
+  bool inside = true;
+  for (void *b : blocks) {
+    const auto offset =
+        reinterpret_cast<std::uintptr_t>(b) & (pools::arenaChunkBytes - 1);
+    inside &= arena.owns(b) && offset + blockBytes <= pools::arenaChunkBytes;
+  }
+  check(inside && arena.current >= 1 && arena.wastedTailBytes > 0, "pools",
+        "arena: %zu blocks of %zu B, none crossing a chunk end", blocks.size(),
+        blockBytes);
+  for (void *b : blocks)
+    alloc::deallocate<Role::Transient>(b, blockBytes, 64);
+  alloc::endPhase();
+}
+
+void checkRouting() {
+  const pools::RoutingStats before = pools::routingStats;
+  auto added = [&](const auto &field, Role role, pools::Route route) {
+    const std::size_t r = alloc::index(role), i = std::to_underlying(route);
+    return (pools::routingStats.*field)[r][i] - (before.*field)[r][i];
+  };
+  struct Request {
+    Role role;
+    std::size_t bytes, align;
+    pools::Route route;
+    void *p;
+  };
+  std::array<Request, 6> requests{{
+      {Role::Hot, 16, 16, pools::Route::HotPool, nullptr},
+      {Role::Hot, 2048, 16, pools::Route::Fallback, nullptr},
+      {Role::Hot, 64, 64, pools::Route::Fallback, nullptr},
+      {Role::Transient, 64, 64, pools::Route::Arena, nullptr},
+      {Role::Transient, 128, 128, pools::Route::Fallback, nullptr},
+      {Role::Cold, 16, 16, pools::Route::Fallback, nullptr},
+  }};
+  for (Request &q : requests)
+    q.p = alloc::withRole(q.role, [&](auto r) {
+      return alloc::allocate<decltype(r)::value>(q.bytes, q.align);
+    });
+  bool allocated = true, owned = true;
+  for (const Request &q : requests) {
+    allocated &= added(&pools::RoutingStats::allocations, q.role, q.route) >= 1;
+    const bool inHot = pools::hotSegments.find(q.p) != nullptr;
+    const bool inArena = pools::transientArena.owns(q.p);
+    owned &= inHot == (q.route == pools::Route::HotPool) &&
+             inArena == (q.route == pools::Route::Arena);
+  }
+  for (const Request &q : requests)
+    alloc::withRole(q.role, [&](auto r) {
+      alloc::deallocate<decltype(r)::value>(q.p, q.bytes, q.align);
+    });
+  bool freed = true;
+  for (const Request &q : requests)
+    freed &= added(&pools::RoutingStats::frees, q.role, q.route) ==
+             added(&pools::RoutingStats::allocations, q.role, q.route);
+  check(allocated && owned && freed, "pools",
+        "routing: oversized and over-aligned requests fall back to glibc");
+}
+
+void checkPoolsStats() {
+  const nlohmann::ordered_json j = alloc::Backend::extraStats();
+  auto keysOf = [](const nlohmann::ordered_json &object) {
+    std::vector<std::string> keys;
+    for (const auto &item : object.items())
+      keys.push_back(item.key());
+    return keys;
+  };
+  using Keys = std::vector<std::string>;
+  bool shape = keysOf(j) == Keys{"routing", "hot", "transient"} &&
+               keysOf(j["routing"]) == Keys{"allocations", "frees"} &&
+               keysOf(j["routing"]["allocations"]) ==
+                   Keys{"default", "hot", "transient", "cold"} &&
+               keysOf(j["routing"]["allocations"]["hot"]) ==
+                   Keys{"hotPool", "arena", "fallback"} &&
+               keysOf(j["hot"]) == Keys{"segments", "pagesUsed", "classes"} &&
+               j["hot"]["classes"].is_array() && !j["hot"]["classes"].empty() &&
+               keysOf(j["hot"]["classes"][0]) ==
+                   Keys{"slotBytes", "pages",     "allocations",
+                        "frees",     "liveSlots", "peakLiveSlots"} &&
+               keysOf(j["transient"]) ==
+                   Keys{"chunks",        "peakChunksUsed", "allocations",
+                        "frees",         "liveBlocks",     "resets",
+                        "skippedResets", "wastedTailBytes"};
+  check(shape, "pools", "extraStats has every field, in order");
+}
+
+void checkPools() {
+  checkHotPool();
+  checkArena();
+  checkRouting();
+  checkPoolsStats();
+}
+#endif
+
 void checkInterface() {
   static_assert(alloc::SeamBackend<alloc::Backend>);
   check(std::string_view(alloc::Backend::name) == tabench::backendName(),
@@ -434,6 +625,59 @@ void checkAborts(bool enabled, const char *what, const char *why, F f) {
     check(abortsInChild(f), "abort", "%s", what);
 }
 
+#if defined(TA_BACKEND_POOLS)
+// Each mistake is set up so the seam's own checks pass (a block of the same
+// size is live in the role it is freed as), so only the backend's check fires.
+void checkPoolsAborts() {
+  const char *noContracts = "contracts not enforced in this build";
+  const char *noSeamChecks = "TA_SEAM_CHECKS is off";
+  bool pre = contractsAbort();
+  checkAborts(pre, "pools: hot free with the wrong size", noContracts, [] {
+    void *p = alloc::allocate<Role::Hot>(48, 16);
+    alloc::deallocate<Role::Hot>(p, 64, 16);
+  });
+  checkAborts(pre, "pools: hot free of an interior pointer", noContracts, [] {
+    void *p = alloc::allocate<Role::Hot>(48, 16);
+    alloc::deallocate<Role::Hot>(static_cast<std::byte *>(p) + 16, 32, 16);
+  });
+  checkAborts(pre && TA_SEAM_CHECKS != 0, "pools: hot double free",
+              pre ? noSeamChecks : noContracts, [] {
+                void *p = alloc::allocate<Role::Hot>(48, 16);
+                (void)alloc::allocate<Role::Hot>(48, 16);
+                alloc::deallocate<Role::Hot>(p, 48, 16);
+                alloc::deallocate<Role::Hot>(p, 48, 16);
+              });
+  checkAborts(TA_SEAM_CHECKS != 0, "pools: hot slot written after free",
+              noSeamChecks, [] {
+                auto *p = static_cast<std::byte *>(
+                    alloc::allocate<Role::Hot>(48, 16));
+                alloc::deallocate<Role::Hot>(p, 48, 16);
+                p[20] = std::byte{1};
+                (void)alloc::allocate<Role::Hot>(48, 16);
+              });
+  checkAborts(pre, "pools: hot slot freed as cold", noContracts, [] {
+    void *p = alloc::allocate<Role::Hot>(48, 16);
+    (void)alloc::allocate<Role::Cold>(48, 16);
+    alloc::deallocate<Role::Cold>(p, 48, 16);
+  });
+  checkAborts(pre, "pools: glibc block freed as hot", noContracts, [] {
+    void *p = alloc::allocate<Role::Cold>(48, 16);
+    (void)alloc::allocate<Role::Hot>(48, 16);
+    alloc::deallocate<Role::Hot>(p, 48, 16);
+  });
+  checkAborts(pre, "pools: hot slot freed as transient", noContracts, [] {
+    void *p = alloc::allocate<Role::Hot>(48, 16);
+    (void)alloc::allocate<Role::Transient>(48, 16);
+    alloc::deallocate<Role::Transient>(p, 48, 16);
+  });
+  checkAborts(pre, "pools: arena block freed as cold", noContracts, [] {
+    void *p = alloc::allocate<Role::Transient>(48, 16);
+    (void)alloc::allocate<Role::Cold>(48, 16);
+    alloc::deallocate<Role::Cold>(p, 48, 16);
+  });
+}
+#endif
+
 void checkContracts() {
   const char *noContracts = "contracts not enforced in this build";
   bool pre = contractsAbort();
@@ -469,6 +713,9 @@ void checkContracts() {
       "TA_SEAM_CHECKS is off", [] {
         std::thread([] { (void)alloc::allocate<Role::Hot>(16, 16); }).join();
       });
+#if defined(TA_BACKEND_POOLS)
+  checkPoolsAborts();
+#endif
 }
 #else
 void checkContracts() { skip("abort", "fork() needed (Linux and macOS)"); }
@@ -499,6 +746,9 @@ int main(int argc, char **argv) {
   checkRandomized();
   checkThrowingConstructor();
   checkRuntimeRoles();
+#if defined(TA_BACKEND_POOLS)
+  checkPools();
+#endif
   checkContracts();
   check(seamStats.totalLiveBytes == 0, "leaks",
         "no seam bytes live at exit (%llu)",

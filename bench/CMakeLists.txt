@@ -93,8 +93,7 @@ function(tieralloc_add_workload name source)
 endfunction()
 
 # Seam tests: one binary per backend, contracts and checks always enforced.
-# Only backends whose header is written; pools joins when pools.hpp exists.
-set(TIERALLOC_SEAM_TEST_BACKENDS plain)
+set(TIERALLOC_SEAM_TEST_BACKENDS plain pools)
 set(TIERALLOC_SEAM_TEST_SOURCE alloc_seam_test.cpp)
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${TIERALLOC_SEAM_TEST_SOURCE})
   foreach(backend IN LISTS TIERALLOC_SEAM_TEST_BACKENDS)
