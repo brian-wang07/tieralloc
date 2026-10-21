@@ -20,6 +20,7 @@
 #include "harness/report.hpp"
 #include "harness/session.hpp"
 #include "harness/summary.hpp"
+#include "ta/testing.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -47,6 +48,8 @@
 #endif
 
 namespace {
+
+using namespace ta::test;
 
 // How many CPUs this thread may run on, or 0 if unknown. Migration only
 // means something when the affinity mask holds a single CPU.
@@ -92,27 +95,9 @@ constexpr std::size_t hugeTestBytes = std::size_t{8} << 20;
 constexpr std::size_t hugePageBytes = std::size_t{2} << 20;
 constexpr std::int64_t minHugeKiB = 2 * mib;
 
-int failures = 0;
 // Set by --no-timing: wall-clock checks report SKIP instead of failing. For
 // smoke tests on a loaded machine, where only correctness is in question.
 bool skipTiming = false;
-
-void report(const char *status, const char *name, const char *fmt,
-            va_list args) {
-  std::printf("%s  %-9s ", status, name);
-  std::vprintf(fmt, args);
-  std::printf("\n");
-}
-
-[[gnu::format(printf, 3, 4)]] void check(bool ok, const char *name,
-                                         const char *fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  report(ok ? "PASS" : "FAIL", name, fmt, args);
-  va_end(args);
-  if (!ok)
-    ++failures;
-}
 
 // A check that depends on wall-clock stability.
 [[gnu::format(printf, 3, 4)]] void checkTiming(bool ok, const char *name,
@@ -837,6 +822,5 @@ int main(int argc, char **argv) {
   memory.samples = samples;
   checkReport(clock, overhead, counters, countedRegion.result(), memory);
 
-  std::printf("%s: %d check(s) failed\n", failures ? "FAILED" : "OK", failures);
-  return failures ? 1 : 0;
+  return finish();
 }

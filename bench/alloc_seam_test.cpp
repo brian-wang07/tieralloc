@@ -11,11 +11,10 @@
 #include "harness/allocator.hpp"
 #include "harness/args.hpp"
 #include "harness/report.hpp"
+#include "ta/testing.hpp"
 
 #include <algorithm>
 #include <array>
-#include <csignal>
-#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -30,13 +29,6 @@
 #include <utility>
 #include <vector>
 
-#if defined(__linux__) || defined(__APPLE__)
-#include <fcntl.h>
-#include <sys/resource.h>
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
-
 namespace alloc = tabench::alloc;
 using alloc::Role;
 using alloc::seamStats;
@@ -50,23 +42,7 @@ template <> inline constexpr Role tabench::alloc::roleOf<HotNode> = Role::Hot;
 
 namespace {
 
-int failures = 0;
-
-[[gnu::format(printf, 3, 4)]] void check(bool ok, const char *name,
-                                         const char *fmt, ...) {
-  std::printf("%s  %-9s ", ok ? "PASS" : "FAIL", name);
-  va_list args;
-  va_start(args, fmt);
-  std::vprintf(fmt, args);
-  va_end(args);
-  std::printf("\n");
-  if (!ok)
-    ++failures;
-}
-
-void skip(const char *name, const char *why) {
-  std::printf("SKIP  %-9s %s\n", name, why);
-}
+using namespace ta::test;
 
 using RoleBytes = std::array<std::uint64_t, alloc::roleCount>;
 
@@ -82,25 +58,6 @@ bool othersUnchanged(const RoleBytes &before, Role role) {
     if (i != alloc::index(role) && seamStats.liveBytes[i] != before[i])
       return false;
   return true;
-}
-
-// Contract checks only abort under these semantics; Clang has no contracts
-// at all, so its preconditions and postconditions vanish.
-constexpr bool contractsAbort() {
-  std::string_view semantic = TA_CONTRACT_SEMANTIC;
-  return TA_HAS_CONTRACTS &&
-         (semantic == "enforce" || semantic == "quick_enforce");
-}
-
-// TA_ASSERT also aborts through its fallback in builds without NDEBUG.
-constexpr bool assertsAbort() {
-#if TA_HAS_CONTRACTS
-  return contractsAbort();
-#elif defined(NDEBUG)
-  return false;
-#else
-  return true;
-#endif
 }
 
 void checkAlignment() {
@@ -593,34 +550,10 @@ static_assert(alloc::SeamBackend<CheckingBackend> &&
 static_assert(!alloc::ChecksFrees<alloc::PlainBackend, Role::Hot>);
 
 #if defined(__linux__) || defined(__APPLE__)
-// Runs f in a forked child with stderr silenced (the violation reports would
-// drown the output) and core dumps off (systemd-coredump would otherwise store
-// one per abort, which takes seconds under mimalloc's large reservations). True
-// if the child died of SIGABRT, which is how both enforce and quick_enforce end
-// on GCC 16, and how the fallbacks end.
-template <class F> bool abortsInChild(F f) {
-  std::fflush(nullptr);
-  pid_t pid = ::fork();
-  if (pid < 0)
-    return false;
-  if (pid == 0) {
-    rlimit noCore{0, 0};
-    ::setrlimit(RLIMIT_CORE, &noCore);
-    int devNull = ::open("/dev/null", O_WRONLY);
-    if (devNull >= 0)
-      ::dup2(devNull, STDERR_FILENO);
-    f();
-    ::_exit(0);
-  }
-  int status = 0;
-  ::waitpid(pid, &status, 0);
-  return WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
-}
-
 template <class F>
 void checkAborts(bool enabled, const char *what, const char *why, F f) {
   if (!enabled)
-    skip("abort", why);
+    skip("abort", "%s", why);
   else
     check(abortsInChild(f), "abort", "%s", what);
 }
@@ -754,9 +687,5 @@ int main(int argc, char **argv) {
         "no seam bytes live at exit (%llu)",
         static_cast<unsigned long long>(seamStats.totalLiveBytes));
 
-  if (failures == 0)
-    std::printf("OK: 0 check(s) failed\n");
-  else
-    std::printf("FAILED: %d check(s) failed\n", failures);
-  return failures == 0 ? 0 : 1;
+  return finish();
 }
