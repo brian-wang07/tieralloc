@@ -142,9 +142,35 @@ GLIB_TUNABLES=glibc.pthread.rseq=0
 ```
 before running so it doesnt silently run without per-CPU caches. Note that this is only for plain: pools always use glibc.  
 
-# interesting stuff to read about 
+# tieralloc-trace
+The heap profiler is implemented by intercepting any allocation/free calls through a layer called a shim by dynamically linking the trace backend. For simplicity, all allocation/free calls will be just called "malloc", but the same process is used for any allocations.  
+
+Terminology:  
+**Procedure Linkage table**: This is created by the static linker at build time. it contains executable stubs for function calls only. The PLT is strictly read/executable only.  
+**Global Offset table**: The GOT is a fixed-size array of pointer-sized slots, written at runtime by the linker. This contains the addresses of external data and functions that are resolved eagerly at startup or lazily on first call, and is what is intercepted.
+
+This interception relies on the fact that there is always a fixed order in which the linker performs symbol name lookup: first in the executable (which for malloc calls will (almost) always be undefined), then libraries dynamically linked via `LD_PRELOAD`, then the executable's default dependencies such as libc++, libstdc++, libc, etc. While the interception itself is quite simple by simply just defining mallocs and dynamically linking, it must still be responsible for calling the correct malloc implementation (in cases where jemalloc, mimalloc, or any other mallocs are to be used). thus, `dlsym(RTLD_NEXT, "malloc")` queries the next definition of malloc after the shim, which resolves to the actual allocator. This is held as a function pointer for future uses. For example:
+
+[Code](https://godbolt.org/z/5eW1KK5q8)  
+The emitted assembly just contains `call malloc@PLT`: The PLT stub that is created looks something like:  
+```
+<malloc@plt>
+  endbr64
+  bnd jmp QWORD PTR [rip+0x2fd5]
+```
+Which is a PC-relative jump into the shim's GOT slot (in this case, `rip + 0x2fd5`). The call then gets forwarded via `dlsym(...)` and returns. 
+
+## pitfalls
+While the C ABI does not have any name-mangling, the C++ Itanium ABI has mangling rules for any function call. Since the lookup is done on the exact symbol that is emitted, the forwarding must also reference the exact symbol name. For example, `operator::new` gets mangled to `_Znwm`, and thus the forwarding becomes `dlsym(RTLD_NEXT, "_Znwm")`.  
+The shared binary that defines the shim also goes through its own GOT, meaning that any malloc calls, including any indirect calls (vector resizing, printf, strings, etc) get binded to the shim again, which loops infinitely. Several layers of protection are implemented to avoid this: the shim never allocates (with a small CTest to ensure that no alloc calls were emitted). However, the malloc calls themselves may also call further allocations: A depth counter is needed to ensure that nested calls only forward to the actual malloc. Some language-level runtimes may also allocate; these need to be dealt with on a case-by-case scenario.  
+glibc also exposes `__libc_malloc` which calls glibc's allocator directly, skipping any interceptions.  
+
+
+
+# interesting stuff
 - x86 CPUID leaves
 - Get better at TMP
+- constinit vs constexpr: constexpr objects are implicitly const; e.g. when defining a compile-time atomic, need to use constinit to be mutable
 ## other stuff
 Churn benchmark: One issue that was prevalent when implementing the churn workload benchmark (allocate/free many objects of varying sizes and lifetime to induce heap fragmentation and visualize RSS growth) was accurately showing natural RSS growth. The environment is setup so that each "run" is a seperate process - it starts with an empty heap and goes through a fixed number of **phases** (e.g. 60). Each phase:
 - Frees the oldest survivors (e.g. ones created >= 8 phases ago)
@@ -154,5 +180,6 @@ Churn benchmark: One issue that was prevalent when implementing the churn worklo
 The survivors are kept and the RSS is sampled once again (phase's trough): per the hypothesis, this should ideally decrease the RSS proportional to the amount of bytes freed (assuming that objects were placed ideally). The issue with this workload is the fact that survivors pin the page that they sit on, and thus if the next phase requests similar sizes then the holes around the survivors just get filled. This was seen in a preliminary run of this workload, when all peak sizes were seen to be equal to the trough as new allocations were placed on the same page as the survivors. This ignores the point of this test: When the size changes the holes become useless as they are not big enough to to serve the new objects, and thus the allocator must request more memory. This is the overhead that is to be measured. 
 
 The fix was quite simple; change the size of the object created per phase. two configs were added: a sawtooth config, where the band size will increase linearly up to a point and reset back to the minimum, and a random config which selects sizes by random. for General purpose allocators, we would expect the RSS to grow much larger than the portion of the heap in use (as survivors pin whole pages), whereas through lifetime segregation survivors that are explicitly tagged as long lasting are densely packed into much fewer pages.
+
 
 
