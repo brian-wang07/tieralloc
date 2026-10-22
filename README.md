@@ -171,6 +171,7 @@ glibc also exposes `__libc_malloc` which calls glibc's allocator directly, skipp
 - x86 CPUID leaves
 - Get better at TMP
 - constinit vs constexpr: constexpr objects are implicitly const; e.g. when defining a compile-time atomic, need to use constinit to be mutable
+- `[[gnu::constructor(<priority>)]]` to construct objects before `main()` gets executed; 101 is highest priority (0-100 are reserved for compiler) and 65535 is lowest
 ## other stuff
 Churn benchmark: One issue that was prevalent when implementing the churn workload benchmark (allocate/free many objects of varying sizes and lifetime to induce heap fragmentation and visualize RSS growth) was accurately showing natural RSS growth. The environment is setup so that each "run" is a seperate process - it starts with an empty heap and goes through a fixed number of **phases** (e.g. 60). Each phase:
 - Frees the oldest survivors (e.g. ones created >= 8 phases ago)
