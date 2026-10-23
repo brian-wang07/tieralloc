@@ -80,45 +80,18 @@ else()
 endif()
 
 # The plain seam test again under each preloaded allocator built by
-# scripts/build-allocators.sh. Read from its manifest at configure time; without
-# the manifest (CI, other machines) these tests are simply not added.
-set(TIERALLOC_DEPS_MANIFEST ${PROJECT_SOURCE_DIR}/build-deps/manifest.json
-    CACHE FILEPATH "Manifest written by scripts/build-allocators.sh")
-if(TARGET seam-test-plain AND EXISTS ${TIERALLOC_DEPS_MANIFEST})
-  # Reconfigure when the allocators are rebuilt.
-  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${TIERALLOC_DEPS_MANIFEST})
-  file(READ ${TIERALLOC_DEPS_MANIFEST} manifest)
-  string(JSON allocatorCount LENGTH "${manifest}" allocators)
-  math(EXPR lastAllocator "${allocatorCount} - 1")
-  foreach(i RANGE ${lastAllocator})
-    string(JSON allocator MEMBER "${manifest}" allocators ${i})
-    # glibc's library is null: it is the system allocator and needs no preload.
-    string(JSON library ERROR_VARIABLE noLibrary GET "${manifest}" allocators ${allocator} library)
-    if(noLibrary OR library STREQUAL "" OR library STREQUAL "null")
-      continue()
-    endif()
-    if(NOT EXISTS ${library})
-      message(WARNING "bench: ${allocator} library missing (${library}); rerun build-allocators.sh")
-      continue()
-    endif()
-    # The allocator's runEnv (e.g. tcmalloc's), so tests run as the matrix does.
-    set(runEnv "")
-    string(JSON runEnvCount ERROR_VARIABLE noRunEnv LENGTH "${manifest}"
-           allocators ${allocator} runEnv)
-    if(NOT noRunEnv AND runEnvCount GREATER 0)
-      math(EXPR lastRunEnv "${runEnvCount} - 1")
-      foreach(j RANGE ${lastRunEnv})
-        string(JSON name MEMBER "${manifest}" allocators ${allocator} runEnv ${j})
-        string(JSON value GET "${manifest}" allocators ${allocator} runEnv ${name})
-        list(APPEND runEnv "${name}=${value}")
-      endforeach()
-    endif()
+# scripts/build-allocators.sh (see cmake/Allocators.cmake).
+if(TARGET seam-test-plain)
+  tieralloc_preloaded_allocators(preloaded)
+  foreach(allocator IN LISTS preloaded)
     add_test(NAME seam-test-plain-${allocator}
-             COMMAND ${CMAKE_COMMAND} -E env LD_PRELOAD=${library} ${runEnv}
+             COMMAND ${CMAKE_COMMAND} -E env LD_PRELOAD=${preloaded_${allocator}_LIBRARY}
+                     ${preloaded_${allocator}_ENV}
                      $<TARGET_FILE:seam-test-plain> --expect-allocator=${allocator})
-    list(APPEND preloaded ${allocator})
   endforeach()
-  message(STATUS "bench: seam tests under preload: ${preloaded}")
+  if(preloaded)
+    message(STATUS "bench: seam tests under preload: ${preloaded}")
+  endif()
 endif()
 
 tieralloc_add_workload(churn workloads/churn.cpp

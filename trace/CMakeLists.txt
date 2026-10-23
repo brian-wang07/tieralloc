@@ -22,6 +22,36 @@ if(NOT TIERALLOC_SANITIZE)
   target_link_options(tieralloc_trace PRIVATE -Wl,-z,now)
   target_link_libraries(tieralloc_trace PRIVATE tieralloc_trace_core ${CMAKE_DL_LIBS})
   tieralloc_contract_semantic(tieralloc_trace quick_enforce)
+
+  # Runs with the shim in LD_PRELOAD; registered with ctest once per
+  # allocator. Building it builds the shim.
+  find_package(Threads REQUIRED)
+  add_executable(trace-shim-test test/shim_test.cpp)
+  target_link_libraries(trace-shim-test PRIVATE tieralloc_trace_core Threads::Threads ${CMAKE_DL_LIBS})
+  tieralloc_contract_semantic(trace-shim-test enforce)
+  add_dependencies(trace-shim-test tieralloc_trace)
+
+  # Once on glibc, then once per allocator from build-allocators.sh with the
+  # shim listed first, as tracing runs will be.
+  add_test(NAME trace-shim-test
+           COMMAND ${CMAKE_COMMAND} -E env LD_PRELOAD=$<TARGET_FILE:tieralloc_trace>
+                   $<TARGET_FILE:trace-shim-test>)
+  # Link-level properties a runtime test can't see: exports, PLT callees,
+  # -z now, initial-exec TLS. Uses the toolchain's binutils.
+  add_test(NAME trace-shim-symbols
+           COMMAND ${CMAKE_COMMAND} -E env NM=${CMAKE_NM} OBJDUMP=${CMAKE_OBJDUMP}
+                   READELF=${CMAKE_READELF}
+                   bash ${CMAKE_CURRENT_SOURCE_DIR}/test/check_shim_symbols.sh
+                   $<TARGET_FILE:tieralloc_trace>)
+
+  tieralloc_preloaded_allocators(preloaded)
+  foreach(allocator IN LISTS preloaded)
+    add_test(NAME trace-shim-test-${allocator}
+             COMMAND ${CMAKE_COMMAND} -E env
+                     "LD_PRELOAD=$<TARGET_FILE:tieralloc_trace> ${preloaded_${allocator}_LIBRARY}"
+                     ${preloaded_${allocator}_ENV}
+                     $<TARGET_FILE:trace-shim-test>)
+  endforeach()
 endif()
 
 add_executable(trace-tsc-test test/tsc_test.cpp)

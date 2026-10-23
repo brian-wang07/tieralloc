@@ -59,6 +59,7 @@ target_link_libraries(tieralloc_common INTERFACE tieralloc_options)
 # The library itself (include/tieralloc.hpp) arrives in M2.
 
 include(cmake/Contracts.cmake)
+include(cmake/Allocators.cmake)
 
 enable_testing()
 
