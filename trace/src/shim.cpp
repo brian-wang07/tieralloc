@@ -1,6 +1,7 @@
 // implements the shim that intercepts any allocation/free call.
 
 #include "real.hpp"
+#include "tatrace/pool.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -202,8 +203,30 @@ void fallbackDeleteAlignedNothrow(void *p, std::align_val_t,
   resolved<&RealAllocator::free>()(p);
 }
 
+// this process's mapping of the watcher's pool; header stays null when
+// tracing is off (no launcher, a grandchild, or a failed attach).
+constinit Pool pool{};
+
+// before main, so the program must not see errno change. MapFailed is the
+// one failure worth a line: only the real target gets that far (the parent
+// check comes first), and errno still holds mmap's reason, since attachPool
+// returns straight after the failed mmap with nothing to clean up.
+void attachFromEnv() noexcept {
+  int programErrno = errno;
+  auto attached = attachPool(parsePoolFd(std::getenv(poolFdEnv)));
+  int attachErrno = errno;
+  if (attached)
+    pool = *attached;
+  else if (attached.error() == AttachError::MapFailed)
+    // strerrordesc_np, not strerror: no locale lookup, so no allocation
+    warn("cannot map the trace pool, tracing off",
+         strerrordesc_np(attachErrno));
+  errno = programErrno;
+}
+
 [[gnu::constructor(101)]] void init() noexcept {
   resolveAll();
+  attachFromEnv();
 
   // safety check: if another malloc wins symbol lookup, raise warning
   Dl_info winner;

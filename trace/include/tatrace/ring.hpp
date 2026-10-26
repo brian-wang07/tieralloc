@@ -1,7 +1,9 @@
 #pragma once
 
 // per-thread spsc ring of 40 B record slots. the producer is the allocation
-// hook on the owning thread, the consumer is the watcher. one mmap per ring:
+// hook on the owning thread, the consumer is the watcher. the memory comes
+// from the caller (the pool), so the ring knows nothing about who owns it,
+// when it's recycled, or whether the watcher is alive:
 //
 //   [ control: 3 x 128 B lines ][ capacity x 40 B slots ]
 //
@@ -12,11 +14,8 @@
 //    acquire-loads tail before overwriting a slot.
 // 3. each side reads the other's line only on its slow path (cachedTail),
 //    so the steady state doesn't ping-pong lines.
-// 4. closed is released after the final head, and the watcher acquires it
-//    before its last drain.
-//
-// fork: the child inherits rings with no watcher; handled by the shim's
-// pthread_atfork, not here.
+// 4. resetRing orders nothing itself; whoever hands the ring to its next
+//    producer publishes the zeroes (the pool's release store of Free).
 
 #include "ta/contracts.hpp"
 #include "tatrace/format.hpp"
@@ -32,8 +31,6 @@
 #include <span>
 
 #include <sched.h>
-#include <sys/mman.h>
-#include <sys/prctl.h>
 
 namespace tatrace {
 
@@ -44,7 +41,8 @@ inline constexpr std::uint64_t minRingCapacity = 4 * maxClaimSlots;
 inline constexpr std::uint64_t defaultRingCapacity = 65536; // 2.5 MiB
 inline constexpr int spinIterations = 1000;
 inline constexpr std::uint64_t ringMagic = 0x00474e4952544154; // "TATRING\0"
-inline constexpr char ringVmaName[] = "tatrace-ring";
+// what claim returns when the give-up hook ended the wait
+inline constexpr std::uint64_t claimFailed = ~std::uint64_t{0};
 
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
@@ -52,13 +50,12 @@ static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 // the adjacent-line prefetcher pulls lines in pairs.
 inline constexpr std::size_t ringLineBytes = 128;
 
-// atomics only so the watcher can read stats while the thread still runs;
-// the producer is the sole writer, so it uses plain load + store, no rmw.
 struct alignas(ringLineBytes) RingProducerLine {
   std::atomic<std::uint64_t> head;
   std::uint64_t cachedTail;
   std::atomic<std::uint64_t> stallTicks;
   std::atomic<std::uint64_t> stallCount;
+  std::atomic<std::uint64_t> dropped;
 };
 
 struct alignas(ringLineBytes) RingConsumerLine {
@@ -68,10 +65,6 @@ struct alignas(ringLineBytes) RingConsumerLine {
 struct alignas(ringLineBytes) RingFixedLine {
   std::uint64_t magic;
   std::uint64_t capacity;
-  std::uint32_t tid;
-  std::uint32_t serial;
-  // written once, by the producer at thread exit
-  std::atomic<std::uint32_t> closed;
 };
 
 struct RingControl {
@@ -83,13 +76,61 @@ struct RingControl {
 static_assert(sizeof(RingControl) == 3 * ringLineBytes);
 static_assert(sizeof(RingControl) % alignof(Record) == 0);
 
+// watcher adds tid and serial from the pool to make the footer's RingStats
+struct RingCounters {
+  std::uint64_t events;
+  std::uint64_t stallTicks;
+  std::uint64_t stallCount;
+  std::uint64_t dropped;
+};
+
+// asked while a producer waits on a full ring: true ends the wait with
+// claimFailed
+struct RingGiveUp {
+  bool (*fn)(const void *ctx) noexcept = nullptr;
+  const void *ctx = nullptr;
+};
+
+namespace detail {
+
 inline Record *ringSlots(RingControl *control) noexcept {
   return reinterpret_cast<Record *>(control + 1);
 }
 
-inline std::size_t ringBytes(std::uint64_t capacity) noexcept {
+} // namespace detail
+
+inline constexpr std::size_t ringBytes(std::uint64_t capacity) noexcept {
   return sizeof(RingControl) + capacity * sizeof(Record);
 }
+
+// mem must hold ringBytes(capacity). the ring starts empty with zeroed
+// counters
+inline RingControl *initRing(void *mem, std::uint64_t capacity) noexcept
+    TA_PRE(mem != nullptr &&
+           reinterpret_cast<std::uintptr_t>(mem) % alignof(RingControl) == 0)
+    TA_PRE(std::has_single_bit(capacity) && capacity >= minRingCapacity) {
+  auto *control = new (mem) RingControl{};
+  control->fixed.magic = ringMagic;
+  control->fixed.capacity = capacity;
+  return control;
+}
+
+// back to empty with zeroed counters, for the ring's next producer. the
+// caller guarantees no producer is attached and the ring is drained.
+inline void resetRing(RingControl *control) noexcept
+    TA_PRE(control != nullptr && control -> fixed.magic == ringMagic)
+    TA_PRE(control->producer.head.load(std::memory_order_relaxed) ==
+           control->consumer.tail.load(std::memory_order_relaxed)) {
+  RingProducerLine &p = control->producer;
+  p.head.store(0, std::memory_order_relaxed);
+  p.cachedTail = 0;
+  p.stallTicks.store(0, std::memory_order_relaxed);
+  p.stallCount.store(0, std::memory_order_relaxed);
+  p.dropped.store(0, std::memory_order_relaxed);
+  control->consumer.tail.store(0, std::memory_order_relaxed);
+}
+
+namespace detail {
 
 [[gnu::always_inline]] inline void cpuRelax() noexcept {
 #if defined(__x86_64__)
@@ -99,15 +140,18 @@ inline std::size_t ringBytes(std::uint64_t capacity) noexcept {
 #endif
 }
 
+} // namespace detail
+
 // held by the owning thread (tls). only `control` is shared state.
 class RingWriter {
 public:
-  explicit RingWriter(RingControl *control) noexcept
+  explicit RingWriter(RingControl *control, RingGiveUp giveUp = {}) noexcept
       TA_PRE(control != nullptr && control->fixed.magic == ringMagic)
-      : control(control), slots(ringSlots(control)),
-        mask(control->fixed.capacity - 1) {}
+      : control(control), slots(detail::ringSlots(control)),
+        mask(control->fixed.capacity - 1), giveUp(giveUp) {}
 
-  // first seq of n free slots; blocks while the ring is full, never drops.
+  // first seq of n free slots. blocks while the ring is full, until the
+  // give-up hook says stop: then claimFailed, and the caller skips the event.
   std::uint64_t claim(std::uint32_t n) noexcept
       TA_PRE(n > 0 && n <= maxClaimSlots) {
     RingProducerLine &p = control->producer;
@@ -140,11 +184,6 @@ public:
     control->producer.head.store(seq + n, std::memory_order_release);
   }
 
-  // after the final publish
-  void close() noexcept {
-    control->fixed.closed.store(1, std::memory_order_release);
-  }
-
 private:
   [[gnu::noinline, gnu::cold]] std::uint64_t
   claimSlow(std::uint64_t head, std::uint32_t n) noexcept {
@@ -159,23 +198,35 @@ private:
       return head;
 
     std::uint64_t start = readTsc();
+    std::uint64_t result = head;
     for (int spins = 0; !fits(); ++spins) {
-      if (spins < spinIterations)
-        cpuRelax();
-      else
-        ::sched_yield(); // the one producer syscall: the ring is full.
+      if (spins < spinIterations) {
+        detail::cpuRelax();
+        continue;
+      }
+      if (giveUp.fn != nullptr && giveUp.fn(giveUp.ctx)) {
+        add(p.dropped, 1);
+        result = claimFailed;
+        break;
+      }
+      ::sched_yield(); // the one producer syscall: the ring is full.
     }
-    p.stallTicks.store(p.stallTicks.load(std::memory_order_relaxed) +
-                           (readTsc() - start),
-                       std::memory_order_relaxed);
-    p.stallCount.store(p.stallCount.load(std::memory_order_relaxed) + 1,
-                       std::memory_order_relaxed);
-    return head;
+    add(p.stallTicks, readTsc() - start);
+    add(p.stallCount, 1);
+    return result;
+  }
+
+  // the producer is the only writer, so no rmw.
+  static void add(std::atomic<std::uint64_t> &counter,
+                  std::uint64_t by) noexcept {
+    counter.store(counter.load(std::memory_order_relaxed) + by,
+                  std::memory_order_relaxed);
   }
 
   RingControl *control;
   Record *slots;
   std::uint64_t mask;
+  RingGiveUp giveUp;
 };
 
 // held by the watcher.
@@ -183,12 +234,9 @@ class RingView {
 public:
   explicit RingView(RingControl *control) noexcept
       TA_PRE(control != nullptr && control->fixed.magic == ringMagic)
-      : control(control), slots(ringSlots(control)),
+      : control(control), slots(detail::ringSlots(control)),
         mask(control->fixed.capacity - 1) {}
 
-  // everything published so far, as fn(a, b, firstSeq); b is non-empty only
-  // when the range wraps. never a partial claim, so never a split blob.
-  // returns the slot count.
   template <class F> std::uint64_t drain(F &&fn) {
     std::uint64_t head = control->producer.head.load(std::memory_order_acquire);
     std::uint64_t tail = control->consumer.tail.load(std::memory_order_relaxed);
@@ -208,22 +256,14 @@ public:
            control->consumer.tail.load(std::memory_order_relaxed);
   }
 
-  // read before the last drain, so nothing published before close is missed.
-  bool closed() const noexcept {
-    return control->fixed.closed.load(std::memory_order_acquire) != 0;
-  }
-
-  // events counts slots, blob payload included; it equals head.
-  RingStats stats() const noexcept {
+  RingCounters counters() const noexcept {
     const RingProducerLine &p = control->producer;
-    return {control->fixed.serial, control->fixed.tid,
-            p.head.load(std::memory_order_acquire),
+    return {p.head.load(std::memory_order_acquire),
             p.stallTicks.load(std::memory_order_relaxed),
-            p.stallCount.load(std::memory_order_relaxed)};
+            p.stallCount.load(std::memory_order_relaxed),
+            p.dropped.load(std::memory_order_relaxed)};
   }
 
-  std::uint32_t tid() const noexcept { return control->fixed.tid; }
-  std::uint32_t serial() const noexcept { return control->fixed.serial; }
   std::uint64_t capacity() const noexcept { return mask + 1; }
 
 private:
@@ -231,33 +271,5 @@ private:
   const Record *slots;
   std::uint64_t mask;
 };
-
-// populated up front so the hook never page-faults on a slot; named so the
-// smaps sum can exclude ring pages from the headline rss. a syscall: the
-// caller decides when (first event, or pre-mapped by the watcher). null on
-// failure; never allocates.
-inline RingControl *mapRing(std::uint64_t capacity, std::uint32_t tid,
-                            std::uint32_t serial) noexcept
-    TA_PRE(std::has_single_bit(capacity) && capacity >= minRingCapacity) {
-  std::size_t bytes = ringBytes(capacity);
-  void *mem = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
-                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
-  if (mem == MAP_FAILED)
-    return nullptr;
-  // needs linux 5.17 and CONFIG_ANON_VMA_NAME; the ring works without it.
-  ::prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, mem, bytes, ringVmaName);
-  auto *control = new (mem) RingControl{};
-  control->fixed.magic = ringMagic;
-  control->fixed.capacity = capacity;
-  control->fixed.tid = tid;
-  control->fixed.serial = serial;
-  return control;
-}
-
-// only after closed(), a final drain, and pending() == 0.
-inline void unmapRing(RingControl *control) noexcept {
-  if (control != nullptr)
-    ::munmap(control, ringBytes(control->fixed.capacity));
-}
 
 } // namespace tatrace

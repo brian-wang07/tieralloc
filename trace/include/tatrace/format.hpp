@@ -13,7 +13,7 @@
 namespace tatrace {
 static_assert(std::endian::native == std::endian::little);
 
-inline constexpr std::uint16_t formatVersion = 1;
+inline constexpr std::uint16_t formatVersion = 2;
 inline constexpr char fileMagic[] = "TATRACE";
 
 // starts at 1, so a zeroed slot reads as corrupt
@@ -272,6 +272,7 @@ struct RingStats {
   std::uint64_t events;
   std::uint64_t stallTicks;
   std::uint64_t stallCount;
+  std::uint64_t dropped; // events given up on while the watcher was gone
 };
 
 static_assert(offsetof(RingStats, serial) == 0);
@@ -279,7 +280,8 @@ static_assert(offsetof(RingStats, tid) == 4);
 static_assert(offsetof(RingStats, events) == 8);
 static_assert(offsetof(RingStats, stallTicks) == 16);
 static_assert(offsetof(RingStats, stallCount) == 24);
-static_assert(sizeof(RingStats) == 32);
+static_assert(offsetof(RingStats, dropped) == 32);
+static_assert(sizeof(RingStats) == 40);
 
 template <class T>
 inline constexpr bool isOnDisk =

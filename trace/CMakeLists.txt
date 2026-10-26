@@ -68,3 +68,8 @@ add_executable(trace-ring-test test/ring_test.cpp)
 target_link_libraries(trace-ring-test PRIVATE tieralloc_trace_core)
 tieralloc_contract_semantic(trace-ring-test enforce)
 add_test(NAME trace-ring-test COMMAND trace-ring-test)
+
+add_executable(trace-pool-test test/pool_test.cpp)
+target_link_libraries(trace-pool-test PRIVATE tieralloc_trace_core)
+tieralloc_contract_semantic(trace-pool-test enforce)
+add_test(NAME trace-pool-test COMMAND trace-pool-test)

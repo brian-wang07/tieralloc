@@ -47,6 +47,13 @@ allowedCallees=(
   write strlen abort
   # bootstrap copy-out, errno
   memcpy __errno_location
+  # attaching the pool in init: syscall wrappers; getenv reads environ in
+  # place; sysconf(_SC_PAGESIZE) reads the auxv; strerrordesc_np returns a
+  # static string with no locale lookup
+  getenv fstat fcntl mmap munmap close getpid getppid sysconf strerrordesc_np
+  # the give-up hook's clock, read only after claimSlow's spin phase; the
+  # vdso answers it in user space
+  clock_gettime
   # operator new fallbacks: new_handler, bad_alloc, nothrow catch, unwinding
   _ZSt15get_new_handlerv __cxa_allocate_exception __cxa_throw
   __cxa_begin_catch __cxa_end_catch _Unwind_Resume _ZSt9terminatev

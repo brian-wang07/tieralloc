@@ -1,8 +1,9 @@
 // Checks for tatrace/ring.hpp: publish and drain, filling to capacity, blob
 // payload straddling the wrap, a full ring blocking the producer and counting
-// the stall, a two-thread stress run that checks continuity and that claims
-// are never split, close, and the contracts. Also prints the uncontended cost
-// of claim + publish. Exits nonzero if any check fails.
+// the stall, the give-up hook ending that wait, reset for reuse, a two-thread
+// stress run that checks continuity and that claims are never split, and the
+// contracts. Also prints the uncontended cost of claim + publish. Exits
+// nonzero if any check fails.
 
 #include "ta/testing.hpp"
 #include "tatrace/ring.hpp"
@@ -14,9 +15,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <random>
 #include <span>
-#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -77,33 +78,33 @@ std::vector<Record> drainAll(RingView &v, std::uint64_t *firstSeq = nullptr,
   return out;
 }
 
-// The smaps sum excludes ring pages by this name. Kernels without
-// CONFIG_ANON_VMA_NAME leave it unnamed, which is a skip, not a failure.
-bool mappingNamed(const void *addr, std::string_view name) {
-  std::FILE *maps = std::fopen("/proc/self/maps", "r");
-  if (!maps)
-    return false;
-  auto target = reinterpret_cast<std::uintptr_t>(addr);
-  char line[512];
-  bool named = false;
-  while (std::fgets(line, sizeof(line), maps)) {
-    unsigned long long lo = 0, hi = 0;
-    if (std::sscanf(line, "%llx-%llx", &lo, &hi) == 2 && lo <= target &&
-        target < hi) {
-      named = std::string_view(line).find(name) != std::string_view::npos;
-      break;
-    }
-  }
-  std::fclose(maps);
-  return named;
-}
+// Ring memory for one test. The pool supplies it in the real thing; here the
+// heap does, which is fine because a test may allocate.
+class TestRing {
+public:
+  explicit TestRing(std::uint64_t capacity)
+      : mem(::operator new(ringBytes(capacity), ringAlign)),
+        control(initRing(mem, capacity)) {}
+  TestRing(const TestRing &) = delete;
+  TestRing &operator=(const TestRing &) = delete;
+  ~TestRing() { ::operator delete(mem, ringAlign); }
+
+  RingControl *get() const { return control; }
+
+private:
+  static constexpr std::align_val_t ringAlign{alignof(RingControl)};
+  void *mem;
+  RingControl *control;
+};
 
 void checkBasic() {
-  RingControl *c = mapRing(smallCapacity, 1, 0);
-  check(c != nullptr, "map", "mapRing(%llu) succeeded",
+  TestRing ring(smallCapacity);
+  RingControl *c = ring.get();
+  RingCounters fresh = RingView(c).counters();
+  check(c->fixed.magic == ringMagic && c->fixed.capacity == smallCapacity &&
+            fresh.events == 0 && fresh.stallCount == 0 && fresh.dropped == 0,
+        "init", "initRing(%llu) starts empty with zeroed counters",
         static_cast<unsigned long long>(smallCapacity));
-  if (!c)
-    return;
   RingWriter w(c);
   RingView v(c);
 
@@ -132,16 +133,11 @@ void checkBasic() {
 
   check(v.drain([](auto, auto, auto) {}) == 0 && v.pending() == 0, "basic",
         "drain of an empty ring returns 0");
-
-  if (mappingNamed(c, ringVmaName))
-    check(true, "vma", "mapping is named [anon:%s]", ringVmaName);
-  else
-    skip("vma", "mapping unnamed (needs CONFIG_ANON_VMA_NAME)");
-  unmapRing(c);
 }
 
 void checkFull() {
-  RingControl *c = mapRing(smallCapacity, 1, 0);
+  TestRing ring(smallCapacity);
+  RingControl *c = ring.get();
   RingWriter w(c);
   RingView v(c);
   fill(w, smallCapacity - 1);
@@ -149,7 +145,7 @@ void checkFull() {
         static_cast<unsigned long long>(v.pending()),
         static_cast<unsigned long long>(smallCapacity));
   fill(w, 1);
-  RingStats st = v.stats();
+  RingCounters st = v.counters();
   check(v.pending() == smallCapacity && st.stallCount == 0, "full",
         "the last free slot claims without a stall (%llu stalls)",
         static_cast<unsigned long long>(st.stallCount));
@@ -159,12 +155,12 @@ void checkFull() {
     intact = got[i].addr == i;
   check(intact && st.events == smallCapacity, "full",
         "a full ring drains all %zu slots intact", got.size());
-  unmapRing(c);
 }
 
 // A 270 B blob claimed at seq 60 of 64: header at 60, payload 61..67 wraps.
 void checkStraddle() {
-  RingControl *c = mapRing(smallCapacity, 1, 0);
+  TestRing ring(smallCapacity);
+  RingControl *c = ring.get();
   RingWriter w(c);
   RingView v(c);
   fill(w, 60);
@@ -205,11 +201,11 @@ void checkStraddle() {
         bytes, padding);
   check(got[n - 1].addr == 0xa110c && got[n - 1].size == 48, "straddle",
         "the alloc after the blob lands intact");
-  unmapRing(c);
 }
 
 void checkBlocking() {
-  RingControl *c = mapRing(smallCapacity, 1, 0);
+  TestRing ring(smallCapacity);
+  RingControl *c = ring.get();
   RingWriter w(c);
   RingView v(c);
   fill(w, smallCapacity);
@@ -221,14 +217,14 @@ void checkBlocking() {
   });
   std::this_thread::sleep_for(blockWindow);
   bool blocked = !done.load(std::memory_order_acquire);
-  check(blocked && v.stats().stallCount == 0, "blocking",
+  check(blocked && v.counters().stallCount == 0, "blocking",
         "claim on a full ring is still blocked after %lld ms",
         static_cast<long long>(blockWindow.count()));
 
   std::vector<Record> first = drainAll(v);
   producer.join();
   std::vector<Record> second = drainAll(v);
-  RingStats st = v.stats();
+  RingCounters st = v.counters();
   check(first.size() == smallCapacity && second.size() == 1 &&
             second[0].addr == smallCapacity,
         "blocking", "after a drain the blocked claim lands as seq %llu",
@@ -236,16 +232,19 @@ void checkBlocking() {
   check(st.stallCount == 1 && st.stallTicks > 0, "blocking",
         "one stall of %llu ticks recorded",
         static_cast<unsigned long long>(st.stallTicks));
-  unmapRing(c);
 }
 
 // Each slot holds addr = seq, size = its claim's length, aux = its index in
 // the claim, so the consumer can check continuity and that every chunk starts
 // at a claim boundary.
 void checkStress() {
-  RingControl *c = mapRing(stressCapacity, 1, 0);
+  TestRing ring(stressCapacity);
+  RingControl *c = ring.get();
   RingWriter w(c);
   RingView v(c);
+  // Stands in for the pool's Closed state: released after the last publish,
+  // acquired before the final drain.
+  std::atomic<bool> producerDone = false;
 
   std::thread producer([&] {
     std::mt19937_64 rng(42);
@@ -258,12 +257,12 @@ void checkStress() {
       w.publish(s, n);
       written += n;
     }
-    w.close();
+    producerDone.store(true, std::memory_order_release);
   });
 
   std::uint64_t expected = 0, chunks = 0, gaps = 0, splits = 0, torn = 0;
   for (;;) {
-    bool closed = v.closed();
+    bool closed = producerDone.load(std::memory_order_acquire);
     std::uint64_t got = v.drain([&](std::span<const Record> a,
                                     std::span<const Record> b,
                                     std::uint64_t first) {
@@ -289,7 +288,7 @@ void checkStress() {
       std::this_thread::yield();
   }
   producer.join();
-  RingStats st = v.stats();
+  RingCounters st = v.counters();
 
   check(expected >= stressSlots && gaps == 0 && torn == 0, "stress",
         "%llu slots in %llu drains: %llu gap(s), %llu bad slot(s)",
@@ -304,22 +303,84 @@ void checkStress() {
   std::printf("INFO  stress    %llu stalls, %llu ticks stalled\n",
               static_cast<unsigned long long>(st.stallCount),
               static_cast<unsigned long long>(st.stallTicks));
-  unmapRing(c);
 }
 
-void checkClose() {
-  RingControl *c = mapRing(smallCapacity, 9, 3);
-  RingWriter w(c);
+bool alwaysGiveUp(const void *) noexcept { return true; }
+
+// Counts its calls and gives up on the third.
+bool giveUpOnThird(const void *ctx) noexcept {
+  auto *calls = static_cast<int *>(const_cast<void *>(ctx));
+  return ++*calls >= 3;
+}
+
+void checkGiveUp() {
+  TestRing ring(smallCapacity);
+  RingControl *c = ring.get();
+  RingWriter w(c, {alwaysGiveUp, nullptr});
   RingView v(c);
-  fill(w, 3);
-  check(!v.closed(), "close", "open before close()");
-  w.close();
-  RingStats st = v.stats();
-  check(v.closed() && drainAll(v).size() == 3 && v.pending() == 0, "close",
-        "after close() the final drain empties the ring");
-  check(st.tid == 9 && st.serial == 3 && v.tid() == 9 && v.serial() == 3,
-        "close", "tid and serial carried through to the stats");
-  unmapRing(c);
+  fill(w, smallCapacity);
+
+  std::uint64_t s = w.claim(1);
+  RingCounters st = v.counters();
+  check(s == claimFailed && v.pending() == smallCapacity && st.dropped == 1 &&
+            st.stallCount == 1,
+        "giveup",
+        "a full ring returns claimFailed, publishes nothing, counts one drop "
+        "and one stall");
+  s = w.claim(maxClaimSlots);
+  check(s == claimFailed && v.counters().dropped == 2, "giveup",
+        "the next full claim fails too; a multi-slot claim is one drop");
+
+  drainAll(v);
+  s = w.claim(1);
+  check(s == smallCapacity && v.counters().dropped == 2, "giveup",
+        "after a drain, claims succeed again at seq %llu",
+        static_cast<unsigned long long>(s));
+
+  int calls = 0;
+  TestRing counted(smallCapacity);
+  RingWriter cw(counted.get(), {giveUpOnThird, &calls});
+  RingView cv(counted.get());
+  fill(cw, smallCapacity);
+  s = cw.claim(1);
+  st = cv.counters();
+  check(s == claimFailed && calls == 3 && st.stallTicks > 0 && st.dropped == 1,
+        "giveup",
+        "the hook is asked each round until it says stop (%d calls), and the "
+        "stall time is still recorded",
+        calls);
+
+  int quiet = 0;
+  TestRing roomy(smallCapacity);
+  RingWriter rw(roomy.get(), {giveUpOnThird, &quiet});
+  fill(rw, smallCapacity);
+  check(quiet == 0, "giveup", "the hook isn't asked while there's room");
+}
+
+void checkReset() {
+  TestRing ring(smallCapacity);
+  RingControl *c = ring.get();
+  RingWriter w(c, {alwaysGiveUp, nullptr});
+  RingView v(c);
+  fill(w, smallCapacity);
+  static_cast<void>(w.claim(1));
+  drainAll(v);
+  fill(w, 5);
+  drainAll(v);
+
+  resetRing(c);
+  RingCounters st = v.counters();
+  check(st.events == 0 && st.stallCount == 0 && st.stallTicks == 0 &&
+            st.dropped == 0 && v.pending() == 0 && c->producer.cachedTail == 0,
+        "reset", "resetRing zeroes head, tail and every counter");
+
+  // A new writer, as the ring's next owner would make.
+  RingWriter next(c);
+  fill(next, 3);
+  std::uint64_t first = ~0ull;
+  std::vector<Record> got = drainAll(v, &first);
+  check(first == 0 && got.size() == 3 && got[0].addr == 0 && got[2].addr == 2,
+        "reset", "the next producer starts again from seq 0");
 }
 
 // Volatile, so the calls happen at run time where contracts are checked.
@@ -327,13 +388,15 @@ volatile std::uint32_t runtimeZero = 0;
 volatile std::uint32_t runtimeTooMany = maxClaimSlots + 1;
 volatile std::uint64_t runtimeOddCapacity = 100;
 volatile std::uint64_t runtimeWrongSeq = 5;
+volatile std::size_t runtimeMisalign = 8;
 
 void checkContracts() {
   if (!contractsAbort()) {
     skip("contract", "contracts not enforced in this build");
     return;
   }
-  RingControl *c = mapRing(smallCapacity, 1, 0);
+  TestRing ring(smallCapacity);
+  RingControl *c = ring.get();
   check(abortsInChild([c] {
           RingWriter w(c);
           static_cast<void>(w.claim(runtimeZero));
@@ -345,21 +408,33 @@ void checkContracts() {
         }),
         "contract", "claim(maxClaimSlots + 1) aborts");
   check(abortsInChild(
-            [] { static_cast<void>(mapRing(runtimeOddCapacity, 1, 0)); }),
-        "contract", "mapRing with a capacity that isn't a power of two aborts");
+            [c] { static_cast<void>(initRing(c, runtimeOddCapacity)); }),
+        "contract",
+        "initRing with a capacity that isn't a power of two aborts");
+  check(abortsInChild([c] {
+          auto *odd = reinterpret_cast<std::byte *>(c) + runtimeMisalign;
+          static_cast<void>(initRing(odd, smallCapacity));
+        }),
+        "contract", "initRing on memory not aligned to a line aborts");
+  check(abortsInChild([c] {
+          RingWriter w(c);
+          fill(w, 1);
+          resetRing(c);
+        }),
+        "contract", "resetRing with undrained slots aborts");
   check(abortsInChild([c] {
           RingWriter w(c);
           static_cast<void>(w.claim(1));
           w.publish(runtimeWrongSeq, 1);
         }),
         "contract", "publish out of order aborts");
-  unmapRing(c);
 }
 
 // Informational: claim + publish of one slot with room in the ring. Timed per
 // round between drains, so the drain isn't counted.
 void printCost() {
-  RingControl *c = mapRing(defaultRingCapacity, 1, 0);
+  TestRing ring(defaultRingCapacity);
+  RingControl *c = ring.get();
   RingWriter w(c);
   RingView v(c);
   ta::TickSample start = ta::samplePair();
@@ -374,7 +449,6 @@ void printCost() {
   double ns = static_cast<double>(ticks) / rate /
               static_cast<double>(costRounds * defaultRingCapacity);
   std::printf("INFO  cost      claim + write + publish %.2f ns per slot\n", ns);
-  unmapRing(c);
 }
 
 } // namespace
@@ -385,7 +459,8 @@ int main() {
   checkStraddle();
   checkBlocking();
   checkStress();
-  checkClose();
+  checkGiveUp();
+  checkReset();
   checkContracts();
   printCost();
   return finish();
