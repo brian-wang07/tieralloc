@@ -75,6 +75,13 @@ How these map onto glibc: an arena is identified by its `ar_ptr` (the main arena
 
 How these map onto tieralloc: an arena is a (tier, lifetime) heap (per thread), a heap is a 2 MiB segment, and the heatmap grid can be drawn at page (64 KiB) or finer granularity. The top chunk corresponds to the not-yet-bumped tail of a page or segment. To produce the block details view, the trace has to record callstack IDs (deduplicated, resolved offline) on both alloc and free. That has to fit the inline-path constraints below.
 
+**Profiler decisions (from comparing with heaptrack, heapprofd, bytehound, tcmalloc/jemalloc profiling, eBPF `memleak`, DHAT and Tracy).** These shape the record format, so they're settled before the drain and recording sub-steps.
+- **Every allocation is recorded; nothing is sampled.** The positional views need every live allocation. The consumer stays out of process, so the target's heap isn't disturbed.
+- **Callstacks:** the shim walks the frame-pointer chain (the build already uses `-fno-omit-frame-pointer`; Fedora's libraries have frame pointers), skipping its own frames. `stackId` is a 64-bit hash of the PCs, so threads need no coordination. Each ring has a small cache in the pool of the hashes its thread has already sent. The first time a thread sees a stack, it sends a multi-slot `Stack` record. The watcher deduplicates across threads, comparing the PCs when the same hash comes from two threads. Free stacks use the same mechanism.
+- **Module map:** the watcher reads `/proc/<pid>/maps` and the build-ID of each executable mapping once the shim attaches, and writes both into the trace. The shim hooks `dlopen`/`dlclose` and writes a marker, so the watcher reads the maps again. A library opened and closed between two passes is missed; that's accepted.
+- **Size:** chunks aren't compressed yet, but the chunk header reserves a "compressed" flag so zstd can be added later without a format bump.
+- **Checks and exports:** a script, not a CTest, compares counts, peak live bytes and never-freed bytes against heaptrack on the bench workloads. The Flamegraphs tab exports folded stacks or pprof, so standard tools can check it.
+
 ## Key principles
 
 - Hints are **user-declared, never predicted**. The profiler's job is to make wrong hints visible.

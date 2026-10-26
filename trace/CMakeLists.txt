@@ -52,6 +52,27 @@ if(NOT TIERALLOC_SANITIZE)
                      ${preloaded_${allocator}_ENV}
                      $<TARGET_FILE:trace-shim-test>)
   endforeach()
+
+  # tieralloc-trace, the launcher and watcher. Its default --shim is this
+  # build's, so building it builds the shim.
+  add_executable(tieralloc_trace_cli src/launcher/main.cpp)
+  set_target_properties(tieralloc_trace_cli PROPERTIES OUTPUT_NAME tieralloc-trace)
+  target_include_directories(tieralloc_trace_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(tieralloc_trace_cli PRIVATE tieralloc_trace_core)
+  target_compile_definitions(tieralloc_trace_cli PRIVATE
+    TA_SHIM_PATH="$<TARGET_FILE:tieralloc_trace>")
+  tieralloc_contract_semantic(tieralloc_trace_cli enforce)
+  add_dependencies(tieralloc_trace_cli tieralloc_trace)
+
+  # The launcher's command line; resolves the real shim, so it lives here.
+  add_executable(trace-options-test test/options_test.cpp)
+  target_include_directories(trace-options-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(trace-options-test PRIVATE tieralloc_trace_core)
+  target_compile_definitions(trace-options-test PRIVATE
+    TA_SHIM_PATH="$<TARGET_FILE:tieralloc_trace>")
+  tieralloc_contract_semantic(trace-options-test enforce)
+  add_dependencies(trace-options-test tieralloc_trace)
+  add_test(NAME trace-options-test COMMAND trace-options-test)
 endif()
 
 add_executable(trace-tsc-test test/tsc_test.cpp)
