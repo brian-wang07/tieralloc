@@ -73,6 +73,16 @@ if(NOT TIERALLOC_SANITIZE)
   tieralloc_contract_semantic(trace-options-test enforce)
   add_dependencies(trace-options-test tieralloc_trace)
   add_test(NAME trace-options-test COMMAND trace-options-test)
+
+  # Spawns real programs with the build's shim preloaded into a real pool.
+  add_executable(trace-spawn-test test/spawn_test.cpp)
+  target_include_directories(trace-spawn-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(trace-spawn-test PRIVATE tieralloc_trace_core)
+  target_compile_definitions(trace-spawn-test PRIVATE
+    TA_SHIM_PATH="$<TARGET_FILE:tieralloc_trace>")
+  tieralloc_contract_semantic(trace-spawn-test enforce)
+  add_dependencies(trace-spawn-test tieralloc_trace)
+  add_test(NAME trace-spawn-test COMMAND trace-spawn-test)
 endif()
 
 add_executable(trace-tsc-test test/tsc_test.cpp)

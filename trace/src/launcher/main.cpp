@@ -1,20 +1,32 @@
 // tieralloc-trace: launches a program with the shim preloaded and attached
-// to a fresh pool, then watches it. For now it only parses and validates its
-// command line and prints what it would launch.
+// to a fresh pool, then watches it.
 
 #include "launcher/options.hpp"
+#include "launcher/spawn.hpp"
+#include "tatrace/pool.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <string_view>
+
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace {
 
 using namespace tatrace::launcher;
+using namespace tatrace;
 
 int usageError(const std::string &message) {
   std::fprintf(stderr, "tieralloc-trace: %s\n%s", message.c_str(),
                usageText().c_str());
   return usageExit;
+}
+
+int runtimeError(const char *step, int error, int code) {
+  std::fprintf(stderr, "tieralloc-trace: %s: %s\n", step, strerror(error));
+  return code;
 }
 
 } // namespace
@@ -31,15 +43,48 @@ int main(int argc, char **argv) {
   if (!shim)
     return usageError(shim.error());
 
-  // Temporary: step 2 replaces this with the launch.
-  std::printf("rings %u, capacity %llu, timeout %llu ms\n",
-              options->pool.ringCount,
-              static_cast<unsigned long long>(options->pool.ringCapacity),
-              static_cast<unsigned long long>(options->pool.heartbeatTimeoutNs /
-                                              nsPerMs));
-  std::printf("shim %s\nprogram", shim->c_str());
-  for (char *const *arg = options->program; *arg != nullptr; ++arg)
-    std::printf(" %s", *arg);
-  std::printf("\n");
-  return 0;
+  auto created = createPool(options->pool);
+  if (!created)
+    return runtimeError(created.error().step, created.error().error,
+                        launcherErrorExit);
+
+  Environment env = buildEnvironment(environ, *shim, created->fd);
+
+  auto pid = spawnTarget(options->program, env.envp(), created->fd);
+  if (!pid) {
+    SpawnError e = pid.error();
+    int code;
+    if (e.kind == SpawnError::Kind::Exec &&
+        std::string_view(e.step) == "execvpe") {
+      std::fprintf(stderr, "tieralloc-trace: cannot run %s: %s\n",
+                   options->program[0], strerror(e.error));
+      code = execFailedExit;
+    } else {
+      std::fprintf(stderr, "tieralloc-trace: %s: %s\n", e.step,
+                   strerror(e.error));
+      code =
+          e.kind == SpawnError::Kind::Exec ? execFailedExit : launcherErrorExit;
+    }
+    destroyPool(*created);
+    return code;
+  }
+
+  ::close(created->fd);
+  created->fd = -1;
+
+  int status = waitFor(*pid);
+
+  if (attachedPid(created->pool) != static_cast<std::uint32_t>(*pid))
+    std::fprintf(stderr,
+                 "tieralloc-trace: %s never loaded the shim (statically "
+                 "linked, setuid, or LD_PRELOAD cleared?)\n",
+                 options->program[0]);
+  if (WIFSIGNALED(status)) {
+    int sig = WTERMSIG(status);
+    std::fprintf(stderr, "tieralloc-trace: %s killed by signal %d (%s)\n",
+                 options->program[0], sig, strsignal(sig));
+  }
+
+  destroyPool(*created);
+  return exitCodeFor(status);
 }
