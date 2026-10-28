@@ -4,6 +4,7 @@
 // every ~1 millisecond, catches exits, collects the status and marks the pool
 // as stopping.
 
+#include "launcher/signals.hpp"
 #include "launcher/spawn.hpp"
 #include "tatrace/pool.hpp"
 
@@ -35,14 +36,15 @@ inline int openPidFd(pid_t pid) noexcept {
 }
 } // namespace detail
 
-inline std::expected<int, WatchError> watchTarget(const Pool &pool, pid_t pid) {
+inline std::expected<int, WatchError> watchTarget(const Pool &pool, pid_t pid,
+                                                  int signalFd) {
   int pidfd = detail::openPidFd(pid);
   if (pidfd == -1)
     return std::unexpected(WatchError{"pidfd_open", errno});
 
   std::array<pollfd, 2> fds{{
       {pidfd, POLLIN, 0},
-      {-1, 0, 0}, // ignored by poll
+      {signalFd, POLLIN, 0}, // -1 when theres no forwarding
   }};
 
   for (;;) {
@@ -57,6 +59,9 @@ inline std::expected<int, WatchError> watchTarget(const Pool &pool, pid_t pid) {
       ::close(pidfd);
       return std::unexpected(WatchError{"poll", error});
     }
+
+    if (fds[1].revents & POLLIN)
+      forwardPending(signalFd, pid);
 
     if (fds[0].revents & POLLIN)
       break;

@@ -3,6 +3,7 @@
 // launches the traced program along with its environment, and turns its wait
 // status into the correct exit code.
 
+#include "launcher/signals.hpp"
 #include "tatrace/pool.hpp"
 
 #include <array>
@@ -103,8 +104,7 @@ enum ChildStage : int {
 
   struct sigaction dfl{};
   dfl.sa_handler = SIG_DFL;
-  std::array<int, 4> signals{SIGINT, SIGQUIT, SIGTERM, SIGHUP};
-  for (const auto sig : signals)
+  for (const auto sig : forwardedSignals)
     ::sigaction(sig, &dfl, nullptr);
 
   sigset_t empty;

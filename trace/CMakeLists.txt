@@ -83,6 +83,28 @@ if(NOT TIERALLOC_SANITIZE)
   tieralloc_contract_semantic(trace-spawn-test enforce)
   add_dependencies(trace-spawn-test tieralloc_trace)
   add_test(NAME trace-spawn-test COMMAND trace-spawn-test)
+
+  # The watcher loop with forked stand-ins, plus one real program; timing
+  # based, with generous margins.
+  add_executable(trace-watch-test test/watch_test.cpp)
+  target_include_directories(trace-watch-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(trace-watch-test PRIVATE tieralloc_trace_core)
+  target_compile_definitions(trace-watch-test PRIVATE
+    TA_SHIM_PATH="$<TARGET_FILE:tieralloc_trace>")
+  tieralloc_contract_semantic(trace-watch-test enforce)
+  add_dependencies(trace-watch-test tieralloc_trace)
+  add_test(NAME trace-watch-test COMMAND trace-watch-test)
+
+  # Signal forwarding: the rule, the block's lifetime, through the watcher
+  # loop, and the real launcher receiving SIGTERM and SIGINT.
+  add_executable(trace-signals-test test/signals_test.cpp)
+  target_include_directories(trace-signals-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(trace-signals-test PRIVATE tieralloc_trace_core)
+  target_compile_definitions(trace-signals-test PRIVATE
+    TA_LAUNCHER="$<TARGET_FILE:tieralloc_trace_cli>")
+  tieralloc_contract_semantic(trace-signals-test enforce)
+  add_dependencies(trace-signals-test tieralloc_trace_cli tieralloc_trace)
+  add_test(NAME trace-signals-test COMMAND trace-signals-test)
 endif()
 
 add_executable(trace-tsc-test test/tsc_test.cpp)

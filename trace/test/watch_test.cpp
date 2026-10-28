@@ -113,7 +113,7 @@ void checkHeartbeat() {
   // 5x the timeout: a loop that stopped beating would be caught many times
   // over.
   pid_t pid = forkChild([&] { return heartbeatStaysFresh(live.pool(), 1000); });
-  auto status = watchTarget(live.pool(), pid);
+  auto status = watchTarget(live.pool(), pid, -1);
   check(status && exitCodeFor(*status) == 0, "beat",
         "the heartbeat stays under %lld ms old for 1 s, 5x the timeout",
         static_cast<long long>(staleNs / 1'000'000));
@@ -125,7 +125,7 @@ void checkPromptExit() {
     return;
   auto start = std::chrono::steady_clock::now();
   pid_t pid = forkChild([] { return 3; });
-  auto status = watchTarget(live.pool(), pid);
+  auto status = watchTarget(live.pool(), pid, -1);
   long long ms = msSince(start);
   check(status && exitCodeFor(*status) == 3, "exit",
         "an exit(3) comes back as status 3");
@@ -141,7 +141,7 @@ void checkSignalDeath() {
     ::raise(SIGTERM);
     return 0;
   });
-  auto status = watchTarget(live.pool(), pid);
+  auto status = watchTarget(live.pool(), pid, -1);
   check(status && WIFSIGNALED(*status) && WTERMSIG(*status) == SIGTERM &&
             exitCodeFor(*status) == 128 + SIGTERM,
         "exit", "death by SIGTERM comes back as that signal, code %d",
@@ -156,7 +156,7 @@ void checkStopsAndCloses() {
   bool clearBefore = stopping.load(std::memory_order_acquire) == 0;
   std::vector<int> before = openFds();
   pid_t pid = forkChild([] { return 0; });
-  auto status = watchTarget(live.pool(), pid);
+  auto status = watchTarget(live.pool(), pid, -1);
   std::vector<int> after = openFds();
   check(status && clearBefore && stopping.load(std::memory_order_acquire) == 1,
         "stop", "stopping is 0 before the loop and 1 once watchTarget returns");
@@ -183,7 +183,7 @@ void checkInterrupted() {
   // only the watcher is interrupted.
   itimerval every{{0, 1000}, {0, 1000}}, off{};
   ::setitimer(ITIMER_REAL, &every, nullptr);
-  auto status = watchTarget(live.pool(), pid);
+  auto status = watchTarget(live.pool(), pid, -1);
   ::setitimer(ITIMER_REAL, &off, nullptr);
   ::sigaction(SIGALRM, &old, nullptr);
 
@@ -202,7 +202,7 @@ void checkNoProcess() {
   pid_t gone = forkChild([] { return 0; });
   waitFor(gone);
   std::vector<int> before = openFds();
-  auto status = watchTarget(live.pool(), gone);
+  auto status = watchTarget(live.pool(), gone, -1);
   std::vector<int> after = openFds();
   check(!status && std::string_view(status.error().step) == "pidfd_open" &&
             status.error().error == ESRCH,
@@ -220,7 +220,7 @@ void checkRealProgram() {
   char *program[] = {argv0.data(), flag.data(), script.data(), nullptr};
   auto start = std::chrono::steady_clock::now();
   auto pid = spawnTarget(program, env.envp(), live.fd());
-  auto status = pid ? watchTarget(live.pool(), *pid)
+  auto status = pid ? watchTarget(live.pool(), *pid, -1)
                     : std::expected<int, WatchError>(
                           std::unexpected(WatchError{"spawn", 0}));
   long long ms = msSince(start);

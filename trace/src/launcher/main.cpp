@@ -2,6 +2,7 @@
 // to a fresh pool, then watches it.
 
 #include "launcher/options.hpp"
+#include "launcher/signals.hpp"
 #include "launcher/spawn.hpp"
 #include "launcher/watch.hpp"
 #include "tatrace/pool.hpp"
@@ -50,6 +51,14 @@ int main(int argc, char **argv) {
     return runtimeError(created.error().step, created.error().error,
                         launcherErrorExit);
 
+  auto signals = ForwardedSignals::create();
+  if (!signals) {
+    runtimeError(signals.error().step, signals.error().error,
+                 launcherErrorExit);
+    destroyPool(*created);
+    return launcherErrorExit;
+  }
+
   Environment env = buildEnvironment(environ, *shim, created->fd);
 
   auto pid = spawnTarget(options->program, env.envp(), created->fd);
@@ -74,7 +83,7 @@ int main(int argc, char **argv) {
   ::close(created->fd);
   created->fd = -1;
 
-  auto watched = watchTarget(created->pool, *pid);
+  auto watched = watchTarget(created->pool, *pid, signals->fd());
   if (!watched) {
     runtimeError(watched.error().step, watched.error().error,
                  launcherErrorExit);
