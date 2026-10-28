@@ -3,6 +3,7 @@
 
 #include "launcher/options.hpp"
 #include "launcher/spawn.hpp"
+#include "launcher/watch.hpp"
 #include "tatrace/pool.hpp"
 
 #include <cstdio>
@@ -10,6 +11,7 @@
 #include <string>
 #include <string_view>
 
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -25,7 +27,7 @@ int usageError(const std::string &message) {
 }
 
 int runtimeError(const char *step, int error, int code) {
-  std::fprintf(stderr, "tieralloc-trace: %s: %s\n", step, strerror(error));
+  std::fprintf(stderr, "tieralloc-trace: %s: %s\n", step, std::strerror(error));
   return code;
 }
 
@@ -57,11 +59,11 @@ int main(int argc, char **argv) {
     if (e.kind == SpawnError::Kind::Exec &&
         std::string_view(e.step) == "execvpe") {
       std::fprintf(stderr, "tieralloc-trace: cannot run %s: %s\n",
-                   options->program[0], strerror(e.error));
+                   options->program[0], std::strerror(e.error));
       code = execFailedExit;
     } else {
       std::fprintf(stderr, "tieralloc-trace: %s: %s\n", e.step,
-                   strerror(e.error));
+                   std::strerror(e.error));
       code =
           e.kind == SpawnError::Kind::Exec ? execFailedExit : launcherErrorExit;
     }
@@ -72,7 +74,17 @@ int main(int argc, char **argv) {
   ::close(created->fd);
   created->fd = -1;
 
-  int status = waitFor(*pid);
+  auto watched = watchTarget(created->pool, *pid);
+  if (!watched) {
+    runtimeError(watched.error().step, watched.error().error,
+                 launcherErrorExit);
+    ::kill(*pid, SIGKILL);
+    waitFor(*pid);
+    destroyPool(*created);
+    return launcherErrorExit;
+  }
+
+  int status = *watched;
 
   if (attachedPid(created->pool) != static_cast<std::uint32_t>(*pid))
     std::fprintf(stderr,
