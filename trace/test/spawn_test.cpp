@@ -7,7 +7,10 @@
 // attaches in the target, the target holds the pool mapped but not its fd,
 // spawnTarget returns once exec succeeds rather than when the program ends,
 // each failure stage is reported with its errno and the failed child is
-// collected, and no fd leaks into the launcher. Exits nonzero if any check
+// collected, and no fd leaks into the launcher. The shim's messages are
+// checked last: one line when it's preloaded without the launcher or with a
+// TATRACE_FD that isn't a number, and nothing for a closed fd or for the
+// target and its children under a real pool. Exits nonzero if any check
 // fails.
 
 #include "launcher/spawn.hpp"
@@ -27,6 +30,7 @@
 #include <string_view>
 #include <vector>
 
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -188,6 +192,7 @@ public:
   explicit operator bool() const { return created.has_value(); }
   int fd() const { return created->fd; }
   const Pool &pool() const { return created->pool; }
+  char *const *envp() const { return env.envp(); }
   std::expected<pid_t, SpawnError>
   spawn(std::initializer_list<const char *> argv, int poolFd) {
     StringList program(argv);
@@ -328,6 +333,117 @@ void checkNoLeaks() {
         "the launcher's own pool fd keeps FD_CLOEXEC");
 }
 
+// What a child wrote to stderr, and how it exited.
+struct Captured {
+  int code = -1;
+  std::string err;
+};
+
+// Runs f in a forked child with stderr on a pipe; f's result is the child's
+// exit code (f may exec instead).
+template <class F> Captured captureStderr(F f) {
+  Captured out;
+  int fds[2];
+  if (::pipe2(fds, O_CLOEXEC) == -1)
+    return out;
+  std::fflush(nullptr);
+  pid_t pid = ::fork();
+  if (pid == 0) {
+    // dup2 clears close-on-exec on the copy, so fd 2 survives an exec
+    ::dup2(fds[1], STDERR_FILENO);
+    ::_exit(f());
+  }
+  ::close(fds[1]);
+  char buffer[512];
+  for (;;) {
+    ssize_t n = ::read(fds[0], buffer, sizeof buffer);
+    if (n == -1 && errno == EINTR)
+      continue;
+    if (n <= 0)
+      break;
+    out.err.append(buffer, static_cast<std::size_t>(n));
+  }
+  ::close(fds[0]);
+  out.code = pid > 0 ? exitCodeFor(waitFor(pid)) : -1;
+  return out;
+}
+
+// Lines of text starting with "tatrace:", the shim's prefix.
+int shimLines(std::string_view text) {
+  int lines = 0;
+  for (std::size_t at = 0; at < text.size();) {
+    std::size_t end = text.find('\n', at);
+    if (end == std::string_view::npos)
+      end = text.size();
+    if (text.substr(at, end - at).starts_with("tatrace:"))
+      ++lines;
+    at = end + 1;
+  }
+  return lines;
+}
+
+// /bin/true with only the shim preloaded, no launcher; fdVar is an extra
+// variable such as "TATRACE_FD=abc", or nullptr.
+Captured preloadedOnly(const char *fdVar) {
+  return captureStderr([fdVar] {
+    std::string preload = std::string("LD_PRELOAD=") + TA_SHIM_PATH;
+    std::string path = "PATH=/usr/bin:/bin";
+    std::string fd = fdVar ? fdVar : "";
+    char *envp[] = {preload.data(), path.data(), fdVar ? fd.data() : nullptr,
+                    nullptr};
+    std::string program = "/bin/true";
+    char *argv[] = {program.data(), nullptr};
+    ::execve(argv[0], argv, envp);
+    return 127;
+  });
+}
+
+void checkShimMessages() {
+  Captured unset = preloadedOnly(nullptr);
+  check(unset.code == 0 && shimLines(unset.err) == 1 &&
+            unset.err.find("not started by") != std::string::npos,
+        "message",
+        "preloaded without the launcher: one 'not started by' line, and the "
+        "program runs normally (%d line(s), exit %d)",
+        shimLines(unset.err), unset.code);
+
+  Captured junk = preloadedOnly("TATRACE_FD=abc");
+  check(junk.code == 0 && shimLines(junk.err) == 1 &&
+            junk.err.find("not a file descriptor number") != std::string::npos,
+        "message",
+        "TATRACE_FD=abc: one 'not a file descriptor number' line (%d "
+        "line(s), exit %d)",
+        shimLines(junk.err), junk.code);
+
+  // the fd a grandchild sees once the target's attach closed it
+  Captured closed = preloadedOnly("TATRACE_FD=999");
+  check(closed.code == 0 && shimLines(closed.err) == 0, "message",
+        "TATRACE_FD naming a closed fd is silent (%d line(s), exit %d)",
+        shimLines(closed.err), closed.code);
+
+  // the child plays the launcher, so the target is its child and ls a
+  // grandchild; all of them share the captured stderr
+  Captured traced = captureStderr([] {
+    Launch launch;
+    if (!launch)
+      return 20;
+    StringList program{"/bin/sh", "-c", "ls / > /dev/null; true"};
+    auto pid = spawnTarget(program.get(), launch.envp(), launch.fd());
+    if (!pid)
+      return 21;
+    int code = exitCodeFor(waitFor(*pid));
+    if (attachedPid(launch.pool()) != static_cast<std::uint32_t>(*pid))
+      return 22;
+    return code;
+  });
+  check(traced.code == 0 && shimLines(traced.err) == 0, "message",
+        "under a real pool, the target and its grandchild print nothing "
+        "(%d line(s), exit %d; 20-22 setup, spawn, attach)",
+        shimLines(traced.err), traced.code);
+  if (shimLines(traced.err) != 0)
+    std::printf("%s", traced.err.c_str());
+}
+
 } // namespace
 
 int main() {
@@ -338,5 +454,6 @@ int main() {
   checkReturnsAtExec();
   checkFailures();
   checkNoLeaks();
+  checkShimMessages();
   return finish();
 }

@@ -203,24 +203,58 @@ void fallbackDeleteAlignedNothrow(void *p, std::align_val_t,
   resolved<&RealAllocator::free>()(p);
 }
 
-// this process's mapping of the watcher's pool; header stays null when
-// tracing is off (no launcher, a grandchild, or a failed attach).
-constinit Pool pool{};
+// pool.header == nullptr -> tracing is off.
+// pid: getpid() when attach is done, so that fork handling can tell this
+// process from a forked copy without needing getpid() on every event.
+struct ShimState {
+  Pool pool;
+  std::uint32_t pid = 0;
+};
+constinit ShimState state{};
 
-// before main, so the program must not see errno change. MapFailed is the
-// one failure worth a line: only the real target gets that far (the parent
-// check comes first), and errno still holds mmap's reason, since attachPool
-// returns straight after the failed mmap with nothing to clean up.
+// before main so only outcomes someone needs to hear about get printed: the
+// shim preloaded without the launcher, an invalid TATRACE_FD or pool, and a map
+// that failed. only the target process will print, and other grandchildren and
+// siblings stay silent.
+void reportAttach(const char *fdText, AttachError error,
+                  int attachErrno) noexcept {
+  if (fdText == nullptr) {
+    warn("not started by tieralloc-trace run; tracing has been turned off");
+    return;
+  }
+  if (parsePoolFd(fdText) < 0) {
+    warn("TATRACE_FD is not a file descriptor number; tracing has been turned "
+         "off");
+    return;
+  }
+  switch (error) {
+  case AttachError::NoPool:          // grandchild
+  case AttachError::BadPool:         // unrelated file with same fd
+  case AttachError::NotOurWatcher:   // grandchild
+  case AttachError::AlreadyAttached: // sibling forked before init
+    return;
+  case AttachError::Mismatch:
+    warn("mismatch in trace pool and tieralloc-trace build; tracing has been "
+         "turned off");
+    return;
+  case AttachError::MapFailed:
+    warn("cannot map the trace pool; tracing has been turned off",
+         strerrordesc_np(attachErrno));
+    return;
+  }
+  fatal("unknown AttachError");
+}
+
+// before main, so the program must not see errno change.
 void attachFromEnv() noexcept {
   int programErrno = errno;
-  auto attached = attachPool(parsePoolFd(std::getenv(poolFdEnv)));
-  int attachErrno = errno;
+  const char *fdText = std::getenv(poolFdEnv);
+  auto attached = attachPool(parsePoolFd(fdText));
+  int attachErrno = errno; // save before it gets overwritten
   if (attached)
-    pool = *attached;
-  else if (attached.error() == AttachError::MapFailed)
-    // strerrordesc_np, not strerror: no locale lookup, so no allocation
-    warn("cannot map the trace pool, tracing off",
-         strerrordesc_np(attachErrno));
+    state = {*attached, static_cast<std::uint32_t>(::getpid())};
+  else
+    reportAttach(fdText, attached.error(), attachErrno);
   errno = programErrno;
 }
 

@@ -93,3 +93,31 @@ How these map onto tieralloc: an arena is a (tier, lifetime) heap (per thread), 
 ## Milestones
 
 M0 harness and baselines → M1 profiler core → M2 allocator, drop-in on Linux → M3 compile-time hints → M4 hotness (PEBS) and snapshot mode → M5 free policies and published report. Future extensions start only after M5.
+
+## Known gaps (M1)
+
+Picked up while building the profiler. Remove an entry once it's fixed or decided.
+
+**Untested**
+- Ctrl-C from a real terminal (the `SI_KERNEL` half of signal forwarding). `signals_test` covers it only with hand-built `signalfd_siginfo` records; an end-to-end test needs a pty. Checked once by hand.
+- The launcher's "never loaded the shim" warning. It needs a statically linked target, which only builds with `glibc-static` and `libstdc++-static` installed.
+- The launcher's kill path after a `WatchError` (`pidfd_open` or `poll` failing on a live child).
+- `ForwardedSignals::create` rolling back the block when `signalfd` fails.
+- The shim's `Mismatch` message end to end. `pool_test` covers `attachPool` returning it, and a grandchild staying silent; reaching the real shim needs a pool from another build.
+- The shim's `MapFailed` message, and `AttachError::MapFailed` under sanitizers (an exact `RLIMIT_AS` can't be set there).
+- Cross-process ring and pool tests run only in the normal build; TSan can't see across processes.
+
+**Accepted limitations**
+- `ForwardedSignals`' destructor has a window between draining the `signalfd` and restoring the mask; a signal landing there kills the launcher at exit, after the program is already collected.
+- Job control: after Ctrl-Z and `fg`, the program can resume a moment before the launcher's first fresh beat. A producer that finds its ring full in that window gives up and counts the drop.
+- The launcher watches only its direct child. If the program exits while its own children run on, the launcher finishes; those children are untraced pass-throughs.
+- Exit codes 1 and 2 are the launcher's own errors and can't be told apart from a program exiting with 1 or 2.
+- The default `--shim` is the build tree's path (`TA_SHIM_PATH`); an installed launcher needs `--shim`.
+- Needs Linux 5.3+ (`pidfd_open`). glibc 2.43's `<sys/pidfd.h>` lacks `extern "C"`, so the launcher makes the raw syscall.
+- The shim attaches by mapping the memfd and casting; nothing formally starts the objects' lifetimes in the target. `std::start_lifetime_as` would, but GCC 16 doesn't implement it.
+- A ring whose claiming thread dies between the CAS and the `Active` store stays `Claiming` for the rest of the run. Only the whole process dying can cause that.
+- The shim prints "not started by tieralloc-trace run" once per exec'd process that preloads it without the launcher. There's no opt-out; add one (e.g. `TATRACE_QUIET`) only if it proves noisy.
+
+**Deferred decisions**
+- The default pool is 64 rings × 64 Ki slots, about 160 MiB of `Shmem`. 16 rings (about 40 MiB) would cover the bench's workloads; revisit once real traces exist.
+- No escalation when the program ignores a forwarded signal; the launcher keeps waiting. A second-signal rule needs an explicit decision.

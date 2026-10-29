@@ -40,7 +40,7 @@
 namespace tatrace {
 
 inline constexpr std::uint64_t poolMagic = 0x004c4f4f50544154; // "TATPOOL\0"
-inline constexpr std::uint32_t poolVersion = 1;
+inline constexpr std::uint32_t poolVersion = 2;
 // launcher -> shim: the pool's fd number in the target
 inline constexpr char poolFdEnv[] = "TATRACE_FD";
 // shows as /memfd:tatrace-pool in the target's maps and smaps
@@ -57,9 +57,17 @@ static_assert(std::bit_cast<std::uint64_t>(std::array<char, 8>{
 
 // watcher writes it once at create; read-only after.
 struct alignas(ringLineBytes) PoolFixedLine {
-  // written last, so a valid magic means a complete pool
-  std::uint64_t magic;
-  std::uint32_t version;
+  // keep the prefix the same. every build reads at these specific offsets, so
+  // attachPool can tell a different build's pool from a stranger's file before
+  // trusting
+  std::uint64_t
+      magic; // offset 0: written last, so a valid magic means a complete pool
+  std::uint32_t version; // offset 8
+  std::uint32_t
+      watcherPid; // offset 12: the target's parent, and others dont match
+
+  // rest is only read when the prefix is verified
+  std::uint32_t pageSize;
   std::uint32_t ringCount;
   // slots per ring, a power of two
   std::uint64_t ringCapacity;
@@ -67,15 +75,15 @@ struct alignas(ringLineBytes) PoolFixedLine {
   std::uint64_t headerBytes;
   std::uint64_t ringStride;
   std::uint64_t totalBytes;
-  std::uint32_t pageSize;
-  // the target's parent; a process whose parent differs doesn't attach
-  std::uint32_t watcherPid;
   // catch a shim and watcher built from different sources
   std::uint32_t headerStructBytes;
   std::uint32_t ringControlBytes;
   std::uint32_t recordBytes;
   std::uint32_t poolRingLineBytes;
 };
+static_assert(offsetof(PoolFixedLine, magic) == 0);
+static_assert(offsetof(PoolFixedLine, version) == 8);
+static_assert(offsetof(PoolFixedLine, watcherPid) == 12);
 
 // how a producer blocked on a full ring tells a live watcher from a dead
 // one; the pool's give-up hook reads it.
@@ -372,9 +380,14 @@ inline std::uint64_t disabledThreads(const Pool &pool) {
   return pool.header->shim.disabledThreads.load(std::memory_order_relaxed);
 }
 
+// BadPool: not a tatrace pool, usually a grandchild whose fd number now names
+// an unrelated file; stay silent.
+// Mismatch: magic matches, but from a different build. worth reporting to user
+// as otherwise would leave an empty trace with no explanation
 enum class AttachError {
   NoPool,
   BadPool,
+  Mismatch,
   NotOurWatcher,
   AlreadyAttached,
   MapFailed,
@@ -444,11 +457,15 @@ inline std::expected<Pool, AttachError> attachPool(int fd) noexcept {
       return std::unexpected(AttachError::BadPool);
     fixed = header->fixed;
   }
-  if (!detail::fixedLineMatches(fixed, pageSize,
-                                static_cast<std::size_t>(st.st_size)))
-    return std::unexpected(AttachError::BadPool);
+  // the parent check comes before the layout check, so only the target can
+  // report Mismatch, otherwise its grandchildren will inherit the open fd and
+  // would print it again. watcherPid is in the fixed prefix, so its safe to
+  // read before the layout is verified.
   if (static_cast<std::uint32_t>(::getppid()) != fixed.watcherPid)
     return std::unexpected(AttachError::NotOurWatcher);
+  if (!detail::fixedLineMatches(fixed, pageSize,
+                                static_cast<std::size_t>(st.st_size)))
+    return std::unexpected(AttachError::Mismatch);
 
   detail::MapGuard map(::mmap(nullptr, fixed.totalBytes, PROT_READ | PROT_WRITE,
                               MAP_SHARED | MAP_POPULATE, fd, 0),

@@ -518,10 +518,16 @@ void checkAttachTampered() {
     return;
   PoolFixedLine &f = created->pool.header->fixed;
   int fd = created->fd;
-  auto tampered = [&](auto change) {
+  // the attach runs in a child of the watcher (the target), or in a
+  // grandchild, which must fail the parent check before the layout check
+  auto tampered = [&](auto change, bool grandchild = false) {
     PoolFixedLine saved = f;
     change(f);
-    int code = exitCodeInChild([fd] { return failedAttachCode(fd); });
+    int code =
+        grandchild ? exitCodeInChild([fd] {
+          return exitCodeInChild([fd] { return failedAttachCode(fd); });
+        })
+                   : exitCodeInChild([fd] { return failedAttachCode(fd); });
     f = saved;
     return code;
   };
@@ -529,20 +535,39 @@ void checkAttachTampered() {
   struct Case {
     const char *what;
     int code;
+    AttachError want;
   };
+  // before the magic matches it isn't a tatrace pool at all; after, a
+  // layout that doesn't match is another build's pool
   const Case cases[] = {
-      {"magic", tampered([](PoolFixedLine &l) { l.magic ^= 1; })},
-      {"version 99", tampered([](PoolFixedLine &l) { l.version = 99; })},
-      {"recordBytes + 1", tampered([](PoolFixedLine &l) { ++l.recordBytes; })},
+      {"magic", tampered([](PoolFixedLine &l) { l.magic ^= 1; }),
+       AttachError::BadPool},
+      {"version 99", tampered([](PoolFixedLine &l) { l.version = 99; }),
+       AttachError::Mismatch},
+      {"recordBytes + 1", tampered([](PoolFixedLine &l) { ++l.recordBytes; }),
+       AttachError::Mismatch},
       {"totalBytes - 1 page",
-       tampered([](PoolFixedLine &l) { l.totalBytes -= l.pageSize; })},
-      {"ringCount 0", tampered([](PoolFixedLine &l) { l.ringCount = 0; })},
+       tampered([](PoolFixedLine &l) { l.totalBytes -= l.pageSize; }),
+       AttachError::Mismatch},
+      {"ringCount 0", tampered([](PoolFixedLine &l) { l.ringCount = 0; }),
+       AttachError::Mismatch},
       {"capacity 1000",
-       tampered([](PoolFixedLine &l) { l.ringCapacity = 1000; })},
+       tampered([](PoolFixedLine &l) { l.ringCapacity = 1000; }),
+       AttachError::Mismatch},
   };
   for (const Case &c : cases)
-    check(c.code == codeFor(AttachError::BadPool), "tamper",
-          "%s is BadPool in the target (code %d)", c.what, c.code);
+    check(c.code == codeFor(c.want), "tamper",
+          "%s is %s in the target (code %d)", c.what,
+          c.want == AttachError::BadPool ? "BadPool" : "Mismatch", c.code);
+
+  // a mismatched pool's target leaves the fd open, so its children inherit
+  // it; they must stop at the parent check and stay silent, not each report
+  // Mismatch
+  int grandchild = tampered([](PoolFixedLine &l) { l.version = 99; }, true);
+  check(grandchild == codeFor(AttachError::NotOurWatcher), "tamper",
+        "a grandchild given another build's pool is NotOurWatcher, not "
+        "Mismatch (code %d)",
+        grandchild);
   check(attachedPid(created->pool) == 0, "tamper",
         "no tampered attach claimed the pool");
 }
