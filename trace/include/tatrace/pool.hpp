@@ -40,7 +40,7 @@
 namespace tatrace {
 
 inline constexpr std::uint64_t poolMagic = 0x004c4f4f50544154; // "TATPOOL\0"
-inline constexpr std::uint32_t poolVersion = 2;
+inline constexpr std::uint32_t poolVersion = 3;
 // launcher -> shim: the pool's fd number in the target
 inline constexpr char poolFdEnv[] = "TATRACE_FD";
 // shows as /memfd:tatrace-pool in the target's maps and smaps
@@ -111,6 +111,8 @@ struct alignas(ringLineBytes) PoolShimLine {
   std::atomic<std::uint32_t> claimHint;
   // threads that found no free ring
   std::atomic<std::uint64_t> disabledThreads;
+  // events after the thread's ring closed (late dtors, etc)
+  std::atomic<std::uint64_t> lateEvents;
 };
 
 // one writer per line, like the ring's control block: the heartbeat is
@@ -378,6 +380,10 @@ inline std::uint32_t attachedPid(const Pool &pool) {
 
 inline std::uint64_t disabledThreads(const Pool &pool) {
   return pool.header->shim.disabledThreads.load(std::memory_order_relaxed);
+}
+
+inline std::uint64_t lateEvents(const Pool &pool) {
+  return pool.header->shim.lateEvents.load(std::memory_order_relaxed);
 }
 
 // BadPool: not a tatrace pool, usually a grandchild whose fd number now names

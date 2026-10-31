@@ -105,6 +105,54 @@ if(NOT TIERALLOC_SANITIZE)
   tieralloc_contract_semantic(trace-signals-test enforce)
   add_dependencies(trace-signals-test tieralloc_trace_cli tieralloc_trace)
   add_test(NAME trace-signals-test COMMAND trace-signals-test)
+
+  # The program launch_test traces; it reads pool.hpp's layout but never links
+  # the shim, which the launcher preloads.
+  add_executable(launch_probe test/launch_probe.cpp)
+  target_link_libraries(launch_probe PRIVATE tieralloc_trace_core)
+  tieralloc_contract_semantic(launch_probe enforce)
+
+  # A static copy ignores LD_PRELOAD, so the launcher must warn that it never
+  # loaded the shim. Static linking needs glibc-static and libstdc++-static.
+  include(CheckCXXSourceCompiles)
+  set(CMAKE_REQUIRED_LINK_OPTIONS -static)
+  check_cxx_source_compiles("#include <cstdio>
+    int main() { std::puts(\"\"); }" TIERALLOC_CAN_LINK_STATIC)
+  unset(CMAKE_REQUIRED_LINK_OPTIONS)
+  if(TIERALLOC_CAN_LINK_STATIC)
+    add_executable(launch_probe_static test/launch_probe.cpp)
+    target_link_libraries(launch_probe_static PRIVATE tieralloc_trace_core)
+    target_link_options(launch_probe_static PRIVATE -static)
+    tieralloc_contract_semantic(launch_probe_static enforce)
+    set(staticProbe $<TARGET_FILE:launch_probe_static>)
+  else()
+    set(staticProbe "")
+  endif()
+
+  # The whole launcher on the probe. Building it builds everything it runs.
+  add_executable(trace-launch-test test/launch_test.cpp)
+  target_link_libraries(trace-launch-test PRIVATE tieralloc_trace_core)
+  target_compile_definitions(trace-launch-test PRIVATE
+    TA_LAUNCHER="$<TARGET_FILE:tieralloc_trace_cli>"
+    TA_SHIM_PATH="$<TARGET_FILE:tieralloc_trace>"
+    TA_PROBE="$<TARGET_FILE:launch_probe>"
+    TA_PROBE_STATIC="${staticProbe}")
+  tieralloc_contract_semantic(trace-launch-test enforce)
+  add_dependencies(trace-launch-test tieralloc_trace_cli tieralloc_trace launch_probe)
+  if(TIERALLOC_CAN_LINK_STATIC)
+    add_dependencies(trace-launch-test launch_probe_static)
+  endif()
+
+  # Once plain, then once per allocator: the launcher inherits it and puts
+  # the shim in front of it, as traced bench runs will.
+  add_test(NAME trace-launch-test COMMAND trace-launch-test)
+  foreach(allocator IN LISTS preloaded)
+    add_test(NAME trace-launch-test-${allocator}
+             COMMAND ${CMAKE_COMMAND} -E env
+                     "LD_PRELOAD=${preloaded_${allocator}_LIBRARY}"
+                     ${preloaded_${allocator}_ENV}
+                     $<TARGET_FILE:trace-launch-test>)
+  endforeach()
 endif()
 
 add_executable(trace-tsc-test test/tsc_test.cpp)

@@ -1,18 +1,24 @@
 // implements the shim that intercepts any allocation/free call.
 
 #include "real.hpp"
+#include "tatrace/format.hpp"
 #include "tatrace/pool.hpp"
+#include "tatrace/tsc.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <optional>
+#include <type_traits>
 
 #include <dlfcn.h>
+#include <pthread.h>
 #include <sys/auxv.h>
 #include <unistd.h>
 
@@ -212,6 +218,120 @@ struct ShimState {
 };
 constinit ShimState state{};
 
+// glibc stores only the first 32 keys inside the thread descriptor.
+constexpr unsigned inlineKeySlots = 32;
+
+enum class ThreadMode : std::uint8_t {
+  Unclaimed,
+  Active,
+  Disabled,
+  Closed,
+};
+
+struct ThreadState {
+  ThreadMode mode = ThreadMode::Unclaimed;
+  std::uint32_t tid = 0;
+  std::uint32_t ringIndex = 0;
+  std::uint8_t exitRounds = 0;
+  std::optional<RingWriter> writer;
+};
+static_assert(std::is_trivially_destructible_v<ThreadState>);
+
+[[gnu::tls_model("initial-exec")]] constinit thread_local ThreadState self{};
+
+// created in init after a successful attach
+constinit pthread_key_t exitKey{};
+
+// thread lifecycle functions
+void writeThreadRecord(Kind kind) noexcept {
+  std::uint64_t seq = self.writer->claim(1);
+  if (seq == claimFailed)
+    return;
+  self.writer->slot(seq) = Record{.tsc = readTsc(),
+                                  .addr = self.tid,
+                                  .size = 0,
+                                  .stackId = 0,
+                                  .kind = kind,
+                                  .api = Api::None,
+                                  .tag = 0,
+                                  .flags = 0,
+                                  .aux = 0};
+  self.writer->publish(seq, 1);
+}
+
+// first traced event on this thread
+[[gnu::cold, gnu::noinline]] bool claimThread() noexcept {
+  self.tid = static_cast<std::uint32_t>(gettid());
+  auto claimed = claimRing(state.pool, self.tid);
+  if (!claimed) {
+    self.mode = ThreadMode::Disabled;
+    return false;
+  }
+  self.writer.emplace(claimed->ring, poolGiveUp(state.pool));
+  self.ringIndex = claimed->index;
+  pthread_setspecific(exitKey, &self);
+  writeThreadRecord(Kind::ThreadStart);
+  self.mode = ThreadMode::Active;
+  return true;
+}
+
+[[gnu::always_inline]] inline bool traced() noexcept {
+  if (state.pool.header == nullptr)
+    return false;
+  switch (self.mode) {
+  case ThreadMode::Active:
+    [[likely]] return true;
+  case ThreadMode::Unclaimed:
+    return claimThread();
+  case ThreadMode::Disabled:
+    return false;
+  case ThreadMode::Closed:
+    state.pool.header->shim.lateEvents.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  return false;
+}
+
+// pthread key dtor
+void threadExit(void *) noexcept {
+  if (state.pool.header == nullptr || self.mode != ThreadMode::Active)
+    return;
+
+  Reentry g;
+  if (++self.exitRounds < PTHREAD_DESTRUCTOR_ITERATIONS) {
+    pthread_setspecific(exitKey, &self);
+    return;
+  }
+  writeThreadRecord(Kind::ThreadExit);
+  closeRing(state.pool, self.ringIndex);
+  self.writer.reset();
+  self.mode = ThreadMode::Closed;
+}
+
+void afterForkChild() noexcept {
+  // inside child process, immediately after fork to prevent it from writing to
+  // parent rings.
+  state = {};
+}
+
+bool setUpThreadTracking() noexcept {
+  if (int err = pthread_key_create(&exitKey, threadExit); err != 0) {
+    warn("cannot create the thread-exit key; tracing has been turned off",
+         strerrordesc_np(err));
+    return false;
+  }
+  if (exitKey >= inlineKeySlots)
+    warn("thread-exit key is past glibc's inline slots; claiming a ring may "
+         "allocate");
+  if (int err = pthread_atfork(nullptr, nullptr, afterForkChild); err != 0) {
+    warn("cannot register the fork handler; tracing has been turned off",
+         strerrordesc_np(err));
+    pthread_key_delete(exitKey);
+    return false;
+  }
+  return true;
+}
+
 // before main so only outcomes someone needs to hear about get printed: the
 // shim preloaded without the launcher, an invalid TATRACE_FD or pool, and a map
 // that failed. only the target process will print, and other grandchildren and
@@ -251,10 +371,10 @@ void attachFromEnv() noexcept {
   const char *fdText = std::getenv(poolFdEnv);
   auto attached = attachPool(parsePoolFd(fdText));
   int attachErrno = errno; // save before it gets overwritten
-  if (attached)
-    state = {*attached, static_cast<std::uint32_t>(::getpid())};
-  else
+  if (!attached)
     reportAttach(fdText, attached.error(), attachErrno);
+  else if (setUpThreadTracking())
+    state = {*attached, static_cast<std::uint32_t>(::getpid())};
   errno = programErrno;
 }
 
@@ -269,8 +389,8 @@ void attachFromEnv() noexcept {
     // cant tell
     return;
   // our own base
-  const void *self = objectBase(reinterpret_cast<const void *>(&init));
-  if (winner.dli_fbase != self)
+  const void *own = objectBase(reinterpret_cast<const void *>(&init));
+  if (winner.dli_fbase != own)
     warn("malloc is served by another library. list the trace first in "
          "LD_PRELOAD",
          winner.dli_fname);
@@ -319,6 +439,8 @@ template <auto Member, class... Args>
 [[gnu::always_inline]] inline decltype(auto)
 forwardAlloc(Args... args) noexcept(noexcept(resolved<Member>()(args...))) {
   Reentry g;
+  if (g.outer)
+    traced();
   // dont need to forward args as args is always trivially copyable
   return resolved<Member>()(args...);
 }
@@ -326,9 +448,14 @@ forwardAlloc(Args... args) noexcept(noexcept(resolved<Member>()(args...))) {
 // ...and of every freeing hook: bootstrap blocks are never forwarded
 template <auto Member, class... Args>
 [[gnu::always_inline]] inline void forwardFree(void *p, Args... args) noexcept {
+  // freeing a nullptr is a noop
+  if (p == nullptr)
+    return;
   if (isBootstrap(p)) [[unlikely]]
     return;
   Reentry g;
+  if (g.outer)
+    traced();
   resolved<Member>()(p, args...);
 }
 

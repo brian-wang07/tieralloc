@@ -100,7 +100,7 @@ Picked up while building the profiler. Remove an entry once it's fixed or decide
 
 **Untested**
 - Ctrl-C from a real terminal (the `SI_KERNEL` half of signal forwarding). `signals_test` covers it only with hand-built `signalfd_siginfo` records; an end-to-end test needs a pty. Checked once by hand.
-- The launcher's "never loaded the shim" warning. It needs a statically linked target, which only builds with `glibc-static` and `libstdc++-static` installed.
+- The launcher's "never loaded the shim" warning. `trace-launch-test` covers it with `launch_probe_static`, which only builds when `glibc-static` and `libstdc++-static` are installed; otherwise the check skips.
 - The launcher's kill path after a `WatchError` (`pidfd_open` or `poll` failing on a live child).
 - `ForwardedSignals::create` rolling back the block when `signalfd` fails.
 - The shim's `Mismatch` message end to end. `pool_test` covers `attachPool` returning it, and a grandchild staying silent; reaching the real shim needs a pool from another build.
@@ -116,6 +116,8 @@ Picked up while building the profiler. Remove an entry once it's fixed or decide
 - Needs Linux 5.3+ (`pidfd_open`). glibc 2.43's `<sys/pidfd.h>` lacks `extern "C"`, so the launcher makes the raw syscall.
 - The shim attaches by mapping the memfd and casting; nothing formally starts the objects' lifetimes in the target. `std::start_lifetime_as` would, but GCC 16 doesn't implement it.
 - A ring whose claiming thread dies between the CAS and the `Active` store stays `Claiming` for the rest of the run. Only the whole process dying can cause that.
+- A thread's ring closes in the last round of pthread key destructors. Events after that (keys with a higher index than the shim's, real frees from `__libc_thread_freeres`) pass through untraced and are only counted in `lateEvents`. A missed free there looks like a survivor; if it's ever significant, the watcher can detect thread death through `/proc/<pid>/task` instead.
+- Threads that never run key destructors (the main thread returning from `main` or calling `exit`, threads still running at process exit, and a thread whose first event comes during its own destructor rounds) keep their rings `Active`; the watcher's final drain must collect `Active` rings too.
 - The shim prints "not started by tieralloc-trace run" once per exec'd process that preloads it without the launcher. There's no opt-out; add one (e.g. `TATRACE_QUIET`) only if it proves noisy.
 
 **Deferred decisions**

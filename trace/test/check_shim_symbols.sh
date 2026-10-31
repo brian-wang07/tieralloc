@@ -54,6 +54,14 @@ allowedCallees=(
   # the give-up hook's clock, read only after claimSlow's spin phase; the
   # vdso answers it in user space
   clock_gettime
+  # a full ring's fallback once spinning fails: the one deliberate syscall on
+  # the hook path, and it never allocates
+  sched_yield
+  # thread tracking: gettid once per thread when it claims a ring;
+  # setspecific stores keys below 32 inside the thread (init warns past that);
+  # key_create, key_delete and atfork (__register_atfork) only from init
+  gettid pthread_setspecific pthread_key_create pthread_key_delete
+  __register_atfork
   # operator new fallbacks: new_handler, bad_alloc, nothrow catch, unwinding
   _ZSt15get_new_handlerv __cxa_allocate_exception __cxa_throw
   __cxa_begin_catch __cxa_end_catch _Unwind_Resume _ZSt9terminatev
